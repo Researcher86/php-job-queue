@@ -9,6 +9,7 @@ enum WorkerState
     case STARTING;
     case IDLE;
     case BUSY;
+    case DRAINING;
     case STOPPING;
     case DEAD;
 }

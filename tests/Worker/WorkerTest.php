@@ -143,4 +143,40 @@ final class WorkerTest extends TestCase
 
         $this->assertSame(7, $worker->getId());
     }
+
+    public function testIdleWorkerEntersDrainingOnDrain(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->markReady();
+
+        $worker->drain();
+
+        $this->assertSame(WorkerState::DRAINING, $worker->getState());
+        $this->assertTrue($worker->isDraining());
+        $this->assertFalse($worker->isAvailable());
+    }
+
+    public function testBusyWorkerEntersDrainingAfterFinishingJob(): void
+    {
+        $worker = new Worker(1, static function (Job $job) use (&$worker): void {
+            // Drain is requested while the worker is still busy
+            $worker->drain();
+        });
+        $worker->markReady();
+
+        $worker->process(Job::create(type: 'test'));
+
+        $this->assertSame(WorkerState::DRAINING, $worker->getState());
+    }
+
+    public function testDrainingWorkerCannotProcessNewJob(): void
+    {
+        $this->expectException(LogicException::class);
+
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->markReady();
+        $worker->drain();
+
+        $worker->process(Job::create(type: 'test'));
+    }
 }

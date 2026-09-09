@@ -12,6 +12,19 @@ use PHPUnit\Framework\TestCase;
 
 final class WorkerPoolTest extends TestCase
 {
+    public function testDrainPutsAllWorkersIntoDraining(): void
+    {
+        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool->start();
+
+        $pool->drain();
+
+        $this->assertTrue($pool->isDraining());
+        foreach ($pool->getWorkers() as $worker) {
+            $this->assertTrue($worker->isDraining());
+        }
+        $this->assertNull($pool->getAvailableWorker());
+    }
     public function testPoolCannotBeEmpty(): void
     {
         $this->expectException(InvalidArgumentException::class);

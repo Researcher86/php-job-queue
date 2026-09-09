@@ -16,9 +16,11 @@ use App\Metrics\MetricsCollector;
 use App\Persistence\JobStorage;
 use Throwable;
 
-final readonly class JobDispatcher
+final class JobDispatcher
 {
     private VisibilityMonitor $monitor;
+
+    private bool $accepting = true;
 
     public function __construct(
         private Queue $queue,
@@ -35,6 +37,10 @@ final readonly class JobDispatcher
 
     public function dispatchNext(): bool
     {
+        if (!$this->accepting) {
+            return false;
+        }
+
         $this->requeueExpired();
 
         $worker = $this->workerPool->getAvailableWorker();
@@ -91,6 +97,17 @@ final readonly class JobDispatcher
     public function isProcessing(Job $job): bool
     {
         return $this->monitor->isProcessing($job);
+    }
+
+    public function isAccepting(): bool
+    {
+        return $this->accepting;
+    }
+
+    public function shutdown(): void
+    {
+        $this->accepting = false;
+        $this->workerPool->drain();
     }
 
     private function handleFailure(Job $job, ?Throwable $exception): void

@@ -23,12 +23,14 @@ final class Worker
             'BUSY' => WorkerState::IDLE,
         ],
         'drain' => [
-            'IDLE' => WorkerState::STOPPING,
+            'STARTING' => WorkerState::DRAINING,
+            'IDLE' => WorkerState::DRAINING,
         ],
         'die' => [
             'STARTING' => WorkerState::DEAD,
             'IDLE' => WorkerState::DEAD,
             'BUSY' => WorkerState::DEAD,
+            'DRAINING' => WorkerState::DEAD,
             'STOPPING' => WorkerState::DEAD,
         ],
     ];
@@ -36,6 +38,8 @@ final class Worker
     private WorkerState $state;
 
     private ?Job $currentJob = null;
+
+    private bool $draining = false;
 
     public function __construct(
         private readonly int $id,
@@ -89,12 +93,25 @@ final class Worker
         } finally {
             $this->currentJob = null;
             $this->apply('finish');
+            if ($this->draining && $this->state === WorkerState::IDLE) {
+                $this->state = WorkerState::DRAINING;
+            }
         }
     }
 
     public function drain(): void
     {
+        if ($this->state === WorkerState::BUSY) {
+            $this->draining = true;
+            return;
+        }
+
         $this->apply('drain');
+    }
+
+    public function isDraining(): bool
+    {
+        return $this->state === WorkerState::DRAINING;
     }
 
     public function markDead(): void

@@ -457,4 +457,27 @@ final class JobDispatcherTest extends TestCase
 
         $this->assertSame(1, $metrics->getCounter('worker_crashes'));
     }
+
+    public function testShutdownStopsDispatchingWithoutLosingJobs(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool->start();
+
+        $job = Job::create(type: 'pending');
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $this->assertTrue($dispatcher->isAccepting());
+
+        $dispatcher->shutdown();
+
+        $this->assertFalse($dispatcher->isAccepting());
+        $this->assertFalse($dispatcher->dispatchNext());
+        $this->assertTrue($pool->isDraining());
+        // The job stays queued and is not lost
+        $this->assertSame(1, $queue->size());
+        $this->assertSame(JobState::READY, $job->getState());
+    }
 }

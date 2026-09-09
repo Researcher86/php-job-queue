@@ -77,6 +77,24 @@ final class WorkerPool
         return $this->getDeadWorkers() !== [];
     }
 
+    public function drain(): void
+    {
+        foreach ($this->workers as $worker) {
+            $worker->drain();
+        }
+    }
+
+    public function isDraining(): bool
+    {
+        foreach ($this->workers as $worker) {
+            if (!$worker->isDraining() && $worker->getState() !== WorkerState::DEAD) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public function replaceDeadWorkers(): int
     {
         $replaced = 0;
