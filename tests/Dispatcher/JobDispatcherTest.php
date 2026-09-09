@@ -8,6 +8,7 @@ use App\Job\Job;
 use App\Job\JobState;
 use App\Dispatcher\JobDispatcher;
 use App\Queue\InMemoryQueue;
+use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
 use App\Worker\WorkerPool;
 use Closure;
@@ -18,13 +19,13 @@ final class JobDispatcherTest extends TestCase
     /**
      * @param Closure(Job): mixed $handler
      */
-    private function dispatcherWith(Closure $handler): array
+    private function dispatcherWith(Closure $handler, ?\App\Retry\RetryPolicy $retryPolicy = null, int $workerCount = 1): array
     {
         $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(1, $handler);
+        $pool = new WorkerPool($workerCount, $handler);
         $pool->start();
 
-        return [$queue, $pool, new JobDispatcher($queue, $pool)];
+        return [$queue, $pool, new JobDispatcher($queue, $pool, $retryPolicy, new FakeClock())];
     }
 
     public function testSuccessfulJobIsCompleted(): void
@@ -39,18 +40,54 @@ final class JobDispatcherTest extends TestCase
         $this->assertSame(JobState::COMPLETED, $job->getState());
     }
 
-    public function testFailedJobIsFailed(): void
+    public function testFailedJobIsFailedAfterExhaustingAttempts(): void
     {
         [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
             throw new \RuntimeException('boom');
         });
 
-        $job = Job::create(type: 'bad');
+        $job = Job::create(type: 'bad', maxAttempts: 1);
         $queue->push($job);
 
         $dispatcher->dispatchNext();
 
         $this->assertSame(JobState::FAILED, $job->getState());
+    }
+
+    public function testFailedJobIsRetriedWhenAttemptsRemain(): void
+    {
+        $attempts = 0;
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$attempts): void {
+            $attempts++;
+            throw new \RuntimeException('boom');
+        }, new FixedDelayRetry(0));
+
+        $job = Job::create(type: 'bad', maxAttempts: 2);
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(JobState::READY, $job->getState());
+        $this->assertSame(1, $attempts);
+        $this->assertSame(1, $queue->size());
+    }
+
+    public function testRetriedJobIsDispatchedAgainUntilFailed(): void
+    {
+        $attempts = 0;
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$attempts): void {
+            $attempts++;
+            throw new \RuntimeException('boom');
+        }, new FixedDelayRetry(0));
+
+        $job = Job::create(type: 'bad', maxAttempts: 2);
+        $queue->push($job);
+
+        $dispatcher->drain();
+
+        $this->assertSame(2, $attempts);
+        $this->assertSame(JobState::FAILED, $job->getState());
+        $this->assertSame(0, $queue->size());
     }
 
     public function testJobMovesThroughProcessingState(): void

@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace App\Dispatcher;
 
+use App\Job\Job;
 use App\Queue\Queue;
+use App\Retry\RetryPolicy;
+use App\Support\Clock;
+use App\Support\SystemClock;
 use App\Worker\WorkerPool;
 
 final readonly class JobDispatcher
@@ -12,6 +16,8 @@ final readonly class JobDispatcher
     public function __construct(
         private Queue $queue,
         private WorkerPool $workerPool,
+        private ?RetryPolicy $retryPolicy = null,
+        private Clock $clock = new SystemClock(),
     ) {}
 
     public function dispatchNext(): bool
@@ -32,7 +38,7 @@ final readonly class JobDispatcher
         if ($result->isSuccess()) {
             $job->markCompleted();
         } else {
-            $job->markFailed();
+            $this->handleFailure($job);
         }
 
         return true;
@@ -46,5 +52,17 @@ final readonly class JobDispatcher
         }
 
         return $dispatched;
+    }
+
+    private function handleFailure(Job $job): void
+    {
+        if ($job->getAttempts() < $job->getMaxAttempts()) {
+            $delay = $this->retryPolicy?->nextDelay($job) ?? 0;
+            $job->markRetry($this->clock->now() + $delay);
+            $this->queue->push($job);
+            return;
+        }
+
+        $job->markFailed();
     }
 }

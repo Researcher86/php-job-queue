@@ -116,6 +116,27 @@ final class JobTest extends TestCase
         $job->markReady($this->clock->now());
     }
 
+    public function testJobCanBeRetriedFromProcessing(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing();
+        $job->markRetry(1005.0);
+
+        $this->assertSame(JobState::READY, $job->getState());
+        $this->assertSame(1005.0, $job->getAvailableAt());
+        $this->assertSame(1, $job->getAttempts());
+    }
+
+    public function testCannotMarkRetryFromReady(): void
+    {
+        $this->expectException(LogicException::class);
+
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markRetry(1005.0);
+    }
+
     public function testJobPreservesType(): void
     {
         $job = Job::create(type: 'send_email');

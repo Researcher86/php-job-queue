@@ -439,15 +439,15 @@ Create a minimal development environment.
 
 ### Tasks
 
-* [ ] Create repository `php-job-queue`
-* [ ] Configure Composer
-* [ ] Configure PSR-4 autoloading
-* [ ] Add PHPUnit
-* [ ] Add PHPStan
+* [x] Create repository `php-job-queue`
+* [x] Configure Composer
+* [x] Configure PSR-4 autoloading
+* [x] Add PHPUnit
+* [x] Add PHPStan
 * [ ] Add PHP CS Fixer or another formatter
-* [ ] Create `Makefile`
+* [x] Create `Makefile`
 * [ ] Create initial README
-* [ ] Create PLAN.md
+* [x] Create PLAN.md
 
 ### Initial commands
 
@@ -535,12 +535,12 @@ $job->markFailed();
 
 ### Tests
 
-* [ ] Job receives unique ID
-* [ ] New job starts as CREATED
-* [ ] Job can become READY
-* [ ] Job can become PROCESSING
-* [ ] Job can become COMPLETED
-* [ ] Invalid transitions are rejected
+* [x] Job receives unique ID
+* [x] New job starts as CREATED
+* [x] Job can become READY
+* [x] Job can become PROCESSING
+* [x] Job can become COMPLETED
+* [x] Invalid transitions are rejected
 
 ---
 
@@ -591,10 +591,10 @@ Do not implement retries or persistence yet.
 
 ### Tests
 
-* [ ] FIFO order
-* [ ] Empty queue returns null
-* [ ] Queue size is correct
-* [ ] Multiple jobs work correctly
+* [x] FIFO order
+* [x] Empty queue returns null
+* [x] Queue size is correct
+* [x] Multiple jobs work correctly
 
 ---
 
@@ -650,10 +650,10 @@ Queue
 
 ### Tests
 
-* [ ] Producer creates job
-* [ ] Job type is preserved
-* [ ] Payload is preserved
-* [ ] Job enters READY state
+* [x] Producer creates job
+* [x] Job type is preserved
+* [x] Payload is preserved
+* [x] Job enters READY state
 
 ---
 
@@ -723,10 +723,10 @@ Autoscaling
 
 ### Tests
 
-* [ ] Worker processes job
-* [ ] Worker becomes BUSY
-* [ ] Worker becomes IDLE
-* [ ] Multiple workers process jobs
+* [x] Worker processes job
+* [x] Worker becomes BUSY
+* [x] Worker becomes IDLE
+* [x] Multiple workers process jobs
 
 ---
 
@@ -793,9 +793,9 @@ This becomes increasingly important later.
 
 ### Tests
 
-* [ ] Job goes to available worker
-* [ ] Busy worker does not receive another job
-* [ ] Jobs remain queued when no workers exist
+* [x] Job goes to available worker
+* [x] Busy worker does not receive another job
+* [x] Jobs remain queued when no workers exist
 
 ---
 
@@ -932,9 +932,9 @@ interface RetryPolicy
 
 ### Tests
 
-* [ ] Failed job retries
-* [ ] Attempts increase
-* [ ] Max attempts respected
+* [x] Failed job retries
+* [x] Attempts increase
+* [x] Max attempts respected
 * [ ] Successful retry completes job
 * [ ] Failed final attempt goes to DLQ
 

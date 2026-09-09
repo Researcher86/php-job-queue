@@ -96,14 +96,18 @@ final class Job
 
     public function markReady(float $now): void
     {
-        $this->assertTransition(JobState::READY);
+        if ($this->state !== JobState::CREATED) {
+            throw $this->illegalTransition(JobState::READY);
+        }
         $this->state = JobState::READY;
         $this->availableAt = $now;
     }
 
     public function markProcessing(): void
     {
-        $this->assertTransition(JobState::PROCESSING);
+        if ($this->state !== JobState::READY) {
+            throw $this->illegalTransition(JobState::PROCESSING);
+        }
         $this->state = JobState::PROCESSING;
         $this->attempts++;
         $this->availableAt = null;
@@ -111,31 +115,35 @@ final class Job
 
     public function markCompleted(): void
     {
-        $this->assertTransition(JobState::COMPLETED);
+        if ($this->state !== JobState::PROCESSING) {
+            throw $this->illegalTransition(JobState::COMPLETED);
+        }
         $this->state = JobState::COMPLETED;
     }
 
     public function markFailed(): void
     {
-        $this->assertTransition(JobState::FAILED);
+        if ($this->state !== JobState::PROCESSING) {
+            throw $this->illegalTransition(JobState::FAILED);
+        }
         $this->state = JobState::FAILED;
     }
 
-    private function assertTransition(JobState $target): void
+    public function markRetry(float $availableAt): void
     {
-        $allowed = match ($this->state) {
-            JobState::CREATED => [JobState::READY],
-            JobState::READY => [JobState::PROCESSING],
-            JobState::PROCESSING => [JobState::COMPLETED, JobState::FAILED],
-            default => [],
-        };
-
-        if (!in_array($target, $allowed, true)) {
-            throw new LogicException(sprintf(
-                'Invalid transition: cannot move job from %s to %s',
-                $this->state->name,
-                $target->name,
-            ));
+        if ($this->state !== JobState::PROCESSING) {
+            throw $this->illegalTransition(JobState::READY);
         }
+        $this->state = JobState::READY;
+        $this->availableAt = $availableAt;
+    }
+
+    private function illegalTransition(JobState $target): LogicException
+    {
+        return new LogicException(sprintf(
+            'Invalid transition: cannot move job from %s to %s',
+            $this->state->name,
+            $target->name,
+        ));
     }
 }
