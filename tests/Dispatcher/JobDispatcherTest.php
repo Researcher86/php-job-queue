@@ -5,14 +5,69 @@ declare(strict_types=1);
 namespace App\Tests\Dispatcher;
 
 use App\Job\Job;
+use App\Job\JobState;
 use App\Dispatcher\JobDispatcher;
 use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
 use App\Worker\WorkerPool;
+use Closure;
 use PHPUnit\Framework\TestCase;
 
 final class JobDispatcherTest extends TestCase
 {
+    /**
+     * @param Closure(Job): mixed $handler
+     */
+    private function dispatcherWith(Closure $handler): array
+    {
+        $queue = new InMemoryQueue(new FakeClock());
+        $pool = new WorkerPool(1, $handler);
+        $pool->start();
+
+        return [$queue, $pool, new JobDispatcher($queue, $pool)];
+    }
+
+    public function testSuccessfulJobIsCompleted(): void
+    {
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
+
+        $job = Job::create(type: 'ok');
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(JobState::COMPLETED, $job->getState());
+    }
+
+    public function testFailedJobIsFailed(): void
+    {
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
+            throw new \RuntimeException('boom');
+        });
+
+        $job = Job::create(type: 'bad');
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(JobState::FAILED, $job->getState());
+    }
+
+    public function testJobMovesThroughProcessingState(): void
+    {
+        $states = [];
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$states): void {
+            $states[] = $job->getState();
+        });
+
+        $job = Job::create(type: 'ok');
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        $this->assertSame([JobState::PROCESSING], $states);
+        $this->assertSame(JobState::COMPLETED, $job->getState());
+    }
     public function testJobGoesToAvailableWorker(): void
     {
         $processed = [];

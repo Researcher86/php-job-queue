@@ -87,13 +87,36 @@ final class WorkerTest extends TestCase
         });
         $worker->markReady();
 
-        try {
-            $worker->process(Job::create(type: 'test'));
-        } catch (\RuntimeException) {
-            // expected
-        }
+        $result = $worker->process(Job::create(type: 'test'));
 
+        $this->assertFalse($result->isSuccess());
+        $this->assertNotNull($result->getException());
         $this->assertSame(WorkerState::IDLE, $worker->getState());
+    }
+
+    public function testWorkerReturnsSuccessResult(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->markReady();
+
+        $result = $worker->process(Job::create(type: 'test'));
+
+        $this->assertTrue($result->isSuccess());
+        $this->assertNull($result->getException());
+    }
+
+    public function testWorkerReturnsFailureResultWithException(): void
+    {
+        $expected = new \RuntimeException('boom');
+        $worker = new Worker(1, static function (Job $job) use ($expected): void {
+            throw $expected;
+        });
+        $worker->markReady();
+
+        $result = $worker->process(Job::create(type: 'test'));
+
+        $this->assertFalse($result->isSuccess());
+        $this->assertSame($expected, $result->getException());
     }
 
     public function testWorkerCannotProcessFromStarting(): void

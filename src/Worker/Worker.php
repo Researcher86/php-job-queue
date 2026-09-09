@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Worker;
 
 use App\Job\Job;
+use App\Job\JobResult;
 use Closure;
 use LogicException;
+use Throwable;
 
 final class Worker
 {
@@ -73,13 +75,17 @@ final class Worker
         return $this->state === WorkerState::BUSY;
     }
 
-    public function process(Job $job): void
+    public function process(Job $job): JobResult
     {
         $this->currentJob = $job;
         $this->apply('work');
 
         try {
-            ($this->handler)($job);
+            $result = ($this->handler)($job);
+
+            return $result instanceof JobResult ? $result : JobResult::success();
+        } catch (Throwable $e) {
+            return JobResult::failure($e);
         } finally {
             $this->currentJob = null;
             $this->apply('finish');

@@ -26,7 +26,14 @@ final readonly class JobDispatcher
             return false;
         }
 
-        $worker->process($job);
+        $job->markProcessing();
+        $result = $worker->process($job);
+
+        if ($result->isSuccess()) {
+            $job->markCompleted();
+        } else {
+            $job->markFailed();
+        }
 
         return true;
     }
