@@ -21,6 +21,25 @@ The goal is to build a system that is:
 
 This repository is designed as an **executable mental model of a background job processing system**.
 
+## Status
+
+All 16 phases from [PLAN.md](PLAN.md) are implemented:
+
+`Job model` · `FIFO / delayed / priority queues` · `Producer` · `Worker pool` · `Dispatcher` · `ACK / NACK` · `Retry (fixed & exponential backoff)` · `Visibility timeout` · `Dead Letter Queue` · `Worker crash recovery` · `Persistence (append-only log)` · `Metrics` · `Graceful shutdown` · `Stress & chaos tests`
+
+```bash
+make install        # composer install
+make test           # PHPUnit
+make analyse        # PHPStan (level 8)
+make docker-run     # demo via Docker
+```
+
+Run the demo directly:
+
+```bash
+docker compose exec php php bin/run.php
+```
+
 ---
 
 ## Why?

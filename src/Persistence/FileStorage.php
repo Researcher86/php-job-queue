@@ -33,8 +33,13 @@ final class FileStorage implements JobStorage
             return [];
         }
 
+        $lines = file($this->path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines === false) {
+            throw new RuntimeException("Failed to read job log from {$this->path}");
+        }
+
         $rows = [];
-        foreach (file($this->path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        foreach ($lines as $line) {
             $decoded = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
             $rows[$decoded['key']] = $decoded['data'];
         }

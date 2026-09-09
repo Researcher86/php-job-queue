@@ -14,8 +14,6 @@
     },
     "require": {
         "php": "^8.5",
-        "ext-pcntl": "*",
-        "ext-posix": "*",
         "ramsey/uuid": "^4.9"
     },
     "require-dev": {

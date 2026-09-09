@@ -33,9 +33,15 @@ final class InMemoryQueueTest extends TestCase
         $this->queue->push($b);
         $this->queue->push($c);
 
-        $this->assertSame('a', $this->queue->pop()?->getType());
-        $this->assertSame('b', $this->queue->pop()?->getType());
-        $this->assertSame('c', $this->queue->pop()?->getType());
+        $a = $this->queue->pop();
+        $this->assertNotNull($a);
+        $this->assertSame('a', $a->getType());
+        $b = $this->queue->pop();
+        $this->assertNotNull($b);
+        $this->assertSame('b', $b->getType());
+        $c = $this->queue->pop();
+        $this->assertNotNull($c);
+        $this->assertSame('c', $c->getType());
     }
 
     public function testEmptyQueueReturnsNull(): void
@@ -123,7 +129,7 @@ final class InMemoryQueueTest extends TestCase
         $this->clock->advance(60.0);
         $popped = $this->queue->pop();
 
-        $this->assertNotNull($popped);
+        $this->assertInstanceOf(Job::class, $popped);
         $this->assertSame($job->getId()->toString(), $popped->getId()->toString());
         $this->assertSame(JobState::READY, $job->getState());
     }
@@ -147,12 +153,16 @@ final class InMemoryQueueTest extends TestCase
         $this->queue->push($long, delay: 20);
 
         $this->clock->advance(10.0);
-        $this->assertSame('short', $this->queue->pop()?->getType());
+        $short = $this->queue->pop();
+        $this->assertNotNull($short);
+        $this->assertSame('short', $short->getType());
 
         $this->assertNull($this->queue->pop());
 
         $this->clock->advance(10.0);
-        $this->assertSame('long', $this->queue->pop()?->getType());
+        $long = $this->queue->pop();
+        $this->assertNotNull($long);
+        $this->assertSame('long', $long->getType());
     }
 
     public function testDelayedAndReadyJobsMixOnPop(): void
@@ -160,10 +170,14 @@ final class InMemoryQueueTest extends TestCase
         $this->queue->push(Job::create(type: 'ready_first'), delay: 0);
         $this->queue->push(Job::create(type: 'delayed'), delay: 60);
 
-        $this->assertSame('ready_first', $this->queue->pop()?->getType());
+        $readyFirst = $this->queue->pop();
+        $this->assertNotNull($readyFirst);
+        $this->assertSame('ready_first', $readyFirst->getType());
 
         $this->clock->advance(60.0);
-        $this->assertSame('delayed', $this->queue->pop()?->getType());
+        $delayed = $this->queue->pop();
+        $this->assertNotNull($delayed);
+        $this->assertSame('delayed', $delayed->getType());
     }
 
     public function testReadyJobsSurviveRestart(): void
@@ -176,8 +190,12 @@ final class InMemoryQueueTest extends TestCase
         $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(1000.0));
 
         $this->assertSame(2, $restored->size());
-        $this->assertSame('a', $restored->pop()?->getType());
-        $this->assertSame('b', $restored->pop()?->getType());
+        $first = $restored->pop();
+        $this->assertNotNull($first);
+        $this->assertSame('a', $first->getType());
+        $second = $restored->pop();
+        $this->assertNotNull($second);
+        $this->assertSame('b', $second->getType());
     }
 
     public function testDelayedJobsSurviveRestart(): void

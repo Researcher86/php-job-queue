@@ -35,7 +35,11 @@ final class PriorityQueue implements Queue
         $state = $job->getState();
 
         if ($state === JobState::CREATED) {
-            $job->markReady($this->clock->now() + $delay);
+            if ($delay > 0) {
+                $job->markDelayed($this->clock->now() + $delay);
+            } else {
+                $job->markReady($this->clock->now());
+            }
         }
 
         if ($job->getAvailableAt() !== null && $job->getAvailableAt() > $this->clock->now()) {

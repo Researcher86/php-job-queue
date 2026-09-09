@@ -24,6 +24,8 @@ final class JobDispatcherTest extends TestCase
 {
     /**
      * @param Closure(Job): mixed $handler
+     *
+     * @return array{InMemoryQueue, WorkerPool, JobDispatcher}
      */
     private function dispatcherWith(Closure $handler, ?\App\Retry\RetryPolicy $retryPolicy = null, int $workerCount = 1): array
     {

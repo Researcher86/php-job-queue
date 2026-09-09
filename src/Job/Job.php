@@ -133,8 +133,8 @@ final class Job
             createdAt: (float) $data['createdAt'],
             priority: JobPriority::fromName((string) ($data['priority'] ?? 'NORMAL')),
             state: JobState::fromName((string) $data['state']),
-            attempts: (int) $data['attempts'],
-            availableAt: $data['availableAt'] !== null ? (float) $data['availableAt'] : null,
+            attempts: (int) ($data['attempts'] ?? 0),
+            availableAt: isset($data['availableAt']) ? (float) $data['availableAt'] : null,
         );
     }
 

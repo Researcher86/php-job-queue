@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Tests\Producer;
 
+use App\Job\JobId;
+use App\Job\JobPriority;
 use App\Job\JobState;
 use App\Producer\JobFactory;
 use App\Producer\Producer;
@@ -31,7 +33,7 @@ final class ProducerTest extends TestCase
         $job = $this->producer->dispatch('send_email');
 
         $this->assertSame(1, $this->queue->size());
-        $this->assertNotNull($job->getId());
+        $this->assertInstanceOf(JobId::class, $job->getId());
     }
 
     public function testJobTypeIsPreserved(): void
@@ -71,5 +73,25 @@ final class ProducerTest extends TestCase
         $job = $this->producer->dispatch('send_email', maxAttempts: 7);
 
         $this->assertSame(7, $job->getMaxAttempts());
+    }
+
+    public function testPriorityIsPropagated(): void
+    {
+        $job = $this->producer->dispatch('send_email', priority: JobPriority::HIGH);
+
+        $this->assertSame(JobPriority::HIGH, $job->getPriority());
+    }
+
+    public function testDelaySchedulesTheJob(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $producer = new Producer($queue, new JobFactory($clock));
+
+        $job = $producer->dispatch('send_email', delay: 60);
+
+        $this->assertSame(JobState::DELAYED, $job->getState());
+        $this->assertNull($queue->pop());
+        $this->assertSame(1, $queue->size());
     }
 }

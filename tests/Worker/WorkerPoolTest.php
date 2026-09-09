@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Worker;
 
 use App\Job\Job;
+use App\Worker\Worker;
 use App\Worker\WorkerPool;
 use App\Worker\WorkerState;
 use InvalidArgumentException;
@@ -23,6 +24,20 @@ final class WorkerPoolTest extends TestCase
         foreach ($pool->getWorkers() as $worker) {
             $this->assertTrue($worker->isDraining());
         }
+        $this->assertNull($pool->getAvailableWorker());
+    }
+
+    public function testDrainConsidersBusyWorkerAsDraining(): void
+    {
+        $handler = static function (Job $job): void {};
+        $busy = new Worker(1, $handler, WorkerState::BUSY);
+        $pool = new WorkerPool(1, $handler);
+        $pool->add($busy);
+
+        $pool->drain();
+
+        $this->assertTrue($pool->isDraining());
+        $this->assertTrue($busy->isDraining());
         $this->assertNull($pool->getAvailableWorker());
     }
     public function testPoolCannotBeEmpty(): void

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Tests\Producer;
 
+use App\Job\JobPriority;
 use App\Producer\JobFactory;
 use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
@@ -36,5 +37,14 @@ final class JobFactoryTest extends TestCase
         $job = $factory->create(type: 'send_email', maxAttempts: 5);
 
         $this->assertSame(5, $job->getMaxAttempts());
+    }
+
+    public function testCreatesJobWithPriority(): void
+    {
+        $factory = new JobFactory(new FakeClock());
+
+        $job = $factory->create(type: 'send_email', priority: JobPriority::LOW);
+
+        $this->assertSame(JobPriority::LOW, $job->getPriority());
     }
 }

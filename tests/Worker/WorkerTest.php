@@ -156,7 +156,7 @@ final class WorkerTest extends TestCase
         $this->assertFalse($worker->isAvailable());
     }
 
-    public function testBusyWorkerEntersDrainingAfterFinishingJob(): void
+    public function testBusyWorkerEntersStoppingAfterFinishingJob(): void
     {
         $worker = new Worker(1, static function (Job $job) use (&$worker): void {
             // Drain is requested while the worker is still busy
@@ -166,7 +166,8 @@ final class WorkerTest extends TestCase
 
         $worker->process(Job::create(type: 'test'));
 
-        $this->assertSame(WorkerState::DRAINING, $worker->getState());
+        $this->assertSame(WorkerState::STOPPING, $worker->getState());
+        $this->assertTrue($worker->isDraining());
     }
 
     public function testDrainingWorkerCannotProcessNewJob(): void

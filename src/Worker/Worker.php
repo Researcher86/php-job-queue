@@ -94,7 +94,7 @@ final class Worker
             $this->currentJob = null;
             $this->apply('finish');
             if ($this->draining && $this->state === WorkerState::IDLE) {
-                $this->state = WorkerState::DRAINING;
+                $this->state = WorkerState::STOPPING;
             }
         }
     }
@@ -111,7 +111,7 @@ final class Worker
 
     public function isDraining(): bool
     {
-        return $this->state === WorkerState::DRAINING;
+        return $this->draining || $this->state === WorkerState::DRAINING || $this->state === WorkerState::STOPPING;
     }
 
     public function markDead(): void

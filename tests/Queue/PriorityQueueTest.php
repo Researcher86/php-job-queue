@@ -6,6 +6,7 @@ namespace App\Tests\Queue;
 
 use App\Job\Job;
 use App\Job\JobPriority;
+use App\Job\JobState;
 use App\Queue\PriorityQueue;
 use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
@@ -30,7 +31,7 @@ final class PriorityQueueTest extends TestCase
         $this->queue->push($low);
         $this->queue->push($high);
 
-        $this->assertSame('high', $this->queue->pop()?->getType());
+        $this->assertSame('high', $this->queue->pop()->getType());
         $this->assertSame('low', $this->queue->pop()?->getType());
     }
 
@@ -42,7 +43,7 @@ final class PriorityQueueTest extends TestCase
         $this->queue->push($low);
         $this->queue->push($normal);
 
-        $this->assertSame('normal', $this->queue->pop()?->getType());
+        $this->assertSame('normal', $this->queue->pop()->getType());
         $this->assertSame('low', $this->queue->pop()?->getType());
     }
 
@@ -54,7 +55,7 @@ final class PriorityQueueTest extends TestCase
         $this->queue->push($a);
         $this->queue->push($b);
 
-        $this->assertSame('a', $this->queue->pop()?->getType());
+        $this->assertSame('a', $this->queue->pop()->getType());
         $this->assertSame('b', $this->queue->pop()?->getType());
     }
 
@@ -99,5 +100,26 @@ final class PriorityQueueTest extends TestCase
         $this->clock->advance(60.0);
 
         $this->assertSame('high', $this->queue->pop()?->getType());
+    }
+
+    public function testPushWithDelayMarksJobDelayed(): void
+    {
+        $job = Job::create(type: 'a', priority: JobPriority::NORMAL);
+
+        $this->queue->push($job, delay: 60);
+
+        $this->assertSame(JobState::DELAYED, $job->getState());
+    }
+
+    public function testDelayedJobBecomesReadyWhenPromoted(): void
+    {
+        $job = Job::create(type: 'a', priority: JobPriority::LOW);
+        $this->queue->push($job, delay: 60);
+
+        $this->clock->advance(60.0);
+        $popped = $this->queue->pop();
+
+        $this->assertNotNull($popped);
+        $this->assertSame(JobState::READY, $job->getState());
     }
 }
