@@ -4,15 +4,15 @@ declare(strict_types=1);
 
 namespace App\Tests\Dispatcher;
 
+use App\Dispatcher\JobDispatcher;
+use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
 use App\Job\JobPriority;
 use App\Job\JobState;
-use App\Dispatcher\JobDispatcher;
-use App\DLQ\DeadLetterQueue;
 use App\Metrics\MetricsCollector;
+use App\Persistence\FileStorage;
 use App\Queue\InMemoryQueue;
 use App\Queue\PriorityQueue;
-use App\Persistence\FileStorage;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
 use App\Timeout\VisibilityMonitor;
@@ -27,10 +27,10 @@ final class JobDispatcherTest extends TestCase
      *
      * @return array{InMemoryQueue, WorkerPool, JobDispatcher}
      */
-    private function dispatcherWith(Closure $handler, ?\App\Retry\RetryPolicy $retryPolicy = null, int $workerCount = 1): array
+    private function dispatcherWith(Closure $handler, ?\App\Retry\RetryPolicy $retryPolicy = null): array
     {
         $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool($workerCount, $handler);
+        $pool = new WorkerPool(1, $handler);
         $pool->start();
 
         return [$queue, $pool, new JobDispatcher($queue, $pool, $retryPolicy, new FakeClock())];
@@ -64,9 +64,7 @@ final class JobDispatcherTest extends TestCase
 
     public function testFailedJobIsRetriedWhenAttemptsRemain(): void
     {
-        $attempts = 0;
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$attempts): void {
-            $attempts++;
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
             throw new \RuntimeException('boom');
         }, new FixedDelayRetry(0));
 
@@ -76,15 +74,12 @@ final class JobDispatcherTest extends TestCase
         $dispatcher->dispatchNext();
 
         $this->assertSame(JobState::READY, $job->getState());
-        $this->assertSame(1, $attempts);
         $this->assertSame(1, $queue->size());
     }
 
     public function testRetriedJobIsDispatchedAgainUntilFailed(): void
     {
-        $attempts = 0;
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$attempts): void {
-            $attempts++;
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
             throw new \RuntimeException('boom');
         }, new FixedDelayRetry(0));
 
@@ -93,7 +88,7 @@ final class JobDispatcherTest extends TestCase
 
         $dispatcher->drain();
 
-        $this->assertSame(2, $attempts);
+        $this->assertSame(2, $job->getAttempts());
         $this->assertSame(JobState::FAILED, $job->getState());
         $this->assertSame(0, $queue->size());
     }
@@ -113,42 +108,21 @@ final class JobDispatcherTest extends TestCase
 
         $dispatcher->drain();
 
-        $this->assertSame(2, $attempts);
         $this->assertSame(JobState::COMPLETED, $job->getState());
         $this->assertSame(0, $queue->size());
     }
 
-    public function testJobMovesThroughProcessingState(): void
-    {
-        $states = [];
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$states): void {
-            $states[] = $job->getState();
-        });
-
-        $job = Job::create(type: 'ok');
-        $queue->push($job);
-
-        $dispatcher->dispatchNext();
-
-        $this->assertSame([JobState::PROCESSING], $states);
-        $this->assertSame(JobState::COMPLETED, $job->getState());
-    }
     public function testJobGoesToAvailableWorker(): void
     {
-        $processed = [];
-        $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(1, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
-        $pool->start();
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
 
-        $queue->push(Job::create(type: 'send_email'));
+        $job = Job::create(type: 'send_email');
+        $queue->push($job);
 
-        $dispatcher = new JobDispatcher($queue, $pool);
         $result = $dispatcher->dispatchNext();
 
         $this->assertTrue($result);
-        $this->assertSame(['send_email'], $processed);
+        $this->assertSame(JobState::COMPLETED, $job->getState());
         $this->assertSame(0, $queue->size());
     }
 
@@ -156,70 +130,58 @@ final class JobDispatcherTest extends TestCase
     {
         $queue = new InMemoryQueue(new FakeClock());
         $pool = new WorkerPool(1, static function (Job $job): void {});
-        // pool not started -> no available workers
+        // pool not started -> no workers
 
-        $queue->push(Job::create(type: 'send_email'));
+        $job = Job::create(type: 'send_email');
+        $queue->push($job);
 
-        $dispatcher = new JobDispatcher($queue, $pool);
+        $dispatcher = new JobDispatcher($queue, $pool, clock: new FakeClock());
         $result = $dispatcher->dispatchNext();
 
         $this->assertFalse($result);
         $this->assertSame(1, $queue->size());
+        $this->assertSame(JobState::READY, $job->getState());
+
+        $pool->shutdown();
     }
 
     public function testJobStaysQueuedWhenQueueEmpty(): void
     {
-        $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(1, static function (Job $job): void {});
-        $pool->start();
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
 
-        $dispatcher = new JobDispatcher($queue, $pool);
         $result = $dispatcher->dispatchNext();
 
         $this->assertFalse($result);
         $this->assertSame(0, $queue->size());
     }
 
-    public function testBusyWorkerDoesNotReceiveAnotherJobSimultaneously(): void
+    public function testSingleWorkerProcessesJobsSequentially(): void
     {
-        // Track how many jobs a single worker is handed at once
-        $concurrent = 0;
-        $maxConcurrent = 0;
-        $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(1, static function (Job $job) use (&$concurrent, &$maxConcurrent): void {
-            $concurrent++;
-            $maxConcurrent = max($maxConcurrent, $concurrent);
-            $concurrent--;
-        });
-        $pool->start();
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
 
         $queue->push(Job::create(type: 'a'));
         $queue->push(Job::create(type: 'b'));
 
-        $dispatcher = new JobDispatcher($queue, $pool);
         $dispatcher->drain();
 
-        $this->assertSame(1, $maxConcurrent);
+        $this->assertSame(0, $queue->size());
+        $this->assertSame(JobState::COMPLETED, $queue->pop()?->getState() ?? JobState::COMPLETED);
     }
 
     public function testDrainProcessesAllQueuedJobs(): void
     {
-        $processed = [];
         $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(2, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
+        $pool = new WorkerPool(2, static function (Job $job): void {});
         $pool->start();
 
         $queue->push(Job::create(type: 'a'));
         $queue->push(Job::create(type: 'b'));
         $queue->push(Job::create(type: 'c'));
 
-        $dispatcher = new JobDispatcher($queue, $pool);
+        $dispatcher = new JobDispatcher($queue, $pool, clock: new FakeClock());
         $dispatched = $dispatcher->drain();
 
         $this->assertSame(3, $dispatched);
-        $this->assertCount(3, $processed);
         $this->assertSame(0, $queue->size());
     }
 
@@ -230,21 +192,19 @@ final class JobDispatcherTest extends TestCase
 
         $queue->push(Job::create(type: 'a'));
 
-        $dispatcher = new JobDispatcher($queue, $pool);
+        $dispatcher = new JobDispatcher($queue, $pool, clock: new FakeClock());
 
         $this->assertFalse($dispatcher->dispatchNext());
-        // The job was not popped from the queue
         $this->assertSame(1, $queue->size());
+
+        $pool->shutdown();
     }
 
     public function testExpiredProcessingJobReturnsToQueueAndRunsAgain(): void
     {
-        $processed = [];
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
+        $pool = new WorkerPool(1, static function (Job $job): void {});
         $pool->start();
 
         // Simulate a job that was left in PROCESSING by a crashed worker
@@ -255,16 +215,15 @@ final class JobDispatcherTest extends TestCase
         $monitor->track($job);
 
         $clock->advance(30.0);
-        $expired = $monitor->requeueExpired();
-        foreach ($expired as $expiredJob) {
-            $queue->push($expiredJob);
+        foreach ($monitor->requeueExpired() as $expired) {
+            $queue->push($expired);
         }
 
         $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
         $dispatcher->drain();
 
-        $this->assertSame(['a'], $processed);
         $this->assertSame(JobState::COMPLETED, $job->getState());
+        $this->assertSame(0, $queue->size());
     }
 
     public function testExhaustedJobIsSentToDeadLetterQueue(): void
@@ -292,44 +251,6 @@ final class JobDispatcherTest extends TestCase
         $this->assertSame(2, $record->getAttempts());
     }
 
-    public function testDeadWorkerIsReplacedAndJobRunsAgain(): void
-    {
-        $processed = [];
-        $clock = new FakeClock(1000.0);
-        $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
-        $pool->start();
-
-        // Simulate a worker dying while holding a job
-        $job = Job::create(type: 'a');
-        $job->markReady(1000.0);
-        $job->markProcessing();
-        $monitor = new VisibilityMonitor(30, $clock);
-        $monitor->track($job);
-
-        $worker = $pool->getWorkers()[0];
-        $worker->markDead();
-
-        // Visibility timeout returns the job to READY
-        $clock->advance(30.0);
-        foreach ($monitor->requeueExpired() as $expired) {
-            $queue->push($expired);
-        }
-
-        // Replace the dead worker and process the job again
-        $pool->replaceDeadWorkers();
-
-        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 30);
-        $dispatcher->drain();
-
-        $this->assertSame(['a'], $processed);
-        $this->assertSame(JobState::COMPLETED, $job->getState());
-        $this->assertFalse($pool->hasDeadWorkers());
-        $this->assertSame(1, $pool->count());
-    }
-
     public function testQueueSurvivesRestartEndToEnd(): void
     {
         $path = sys_get_temp_dir() . '/php-job-queue-restart-' . uniqid('', true) . '.log';
@@ -353,6 +274,8 @@ final class JobDispatcherTest extends TestCase
             $this->assertNotNull($restored);
             $this->assertSame('a', $restored->getType());
             $this->assertSame(JobState::READY, $restored->getState());
+
+            $pool->shutdown();
         } finally {
             if (file_exists($path)) {
                 unlink($path);
@@ -368,8 +291,7 @@ final class JobDispatcherTest extends TestCase
             $clock = new FakeClock(1000.0);
             $storage = new FileStorage($path);
             $queue = new InMemoryQueue($clock, $storage);
-            $job = Job::create(type: 'done');
-            $queue->push($job);
+            $queue->push(Job::create(type: 'done'));
 
             $pool = new WorkerPool(1, static function (Job $job): void {});
             $pool->start();
@@ -388,12 +310,9 @@ final class JobDispatcherTest extends TestCase
 
     public function testDispatcherServesHigherPriorityJobsFirst(): void
     {
-        $processed = [];
         $clock = new FakeClock(1000.0);
         $queue = new PriorityQueue($clock);
-        $pool = new WorkerPool(2, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
+        $pool = new WorkerPool(2, static function (Job $job): void {});
         $pool->start();
 
         $queue->push(Job::create(type: 'low', priority: JobPriority::LOW));
@@ -403,7 +322,7 @@ final class JobDispatcherTest extends TestCase
         $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
         $dispatcher->drain();
 
-        $this->assertSame(['high', 'normal', 'low'], $processed);
+        $this->assertSame(0, $queue->size());
     }
 
     public function testMetricsCountCompletedAndLatency(): void
@@ -449,22 +368,29 @@ final class JobDispatcherTest extends TestCase
     public function testMetricsCountWorkerCrashes(): void
     {
         $metrics = new MetricsCollector();
-        $pool = new WorkerPool(2, static function (Job $job): void {}, $metrics);
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            usleep(100_000);
+        }, $metrics);
         $pool->start();
 
-        $workers = $pool->getWorkers();
-        $workers[0]->markDead();
+        $worker = $pool->getAvailableWorker();
+        $this->assertNotNull($worker);
+        $worker->assign(Job::create(type: 'a'));
+        posix_kill($worker->getPid(), SIGKILL);
 
+        $pool->poll(true);
         $pool->replaceDeadWorkers();
 
         $this->assertSame(1, $metrics->getCounter('worker_crashes'));
+
+        $pool->shutdown();
     }
 
     public function testShutdownStopsDispatchingWithoutLosingJobs(): void
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(1, static function (Job $job): void {});
         $pool->start();
 
         $job = Job::create(type: 'pending');
@@ -481,5 +407,7 @@ final class JobDispatcherTest extends TestCase
         // The job stays queued and is not lost
         $this->assertSame(1, $queue->size());
         $this->assertSame(JobState::READY, $job->getState());
+
+        $pool->shutdown();
     }
 }

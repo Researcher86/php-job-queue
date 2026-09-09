@@ -15,7 +15,7 @@ final class WorkerPool
     private array $workers = [];
 
     /**
-     * @param Closure(Job): void $handler
+     * @param Closure(Job): mixed $handler
      */
     public function __construct(
         private readonly int $size,
@@ -29,9 +29,13 @@ final class WorkerPool
 
     public function start(): void
     {
+        if ($this->workers !== []) {
+            return;
+        }
+
         for ($i = 0; $i < $this->size; $i++) {
             $worker = new Worker($i + 1, $this->handler);
-            $worker->markReady();
+            $worker->spawn();
             $this->workers[] = $worker;
         }
     }
@@ -47,6 +51,39 @@ final class WorkerPool
         return null;
     }
 
+    public function busyCount(): int
+    {
+        $count = 0;
+        foreach ($this->workers as $worker) {
+            if ($worker->isBusy()) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    public function poll(bool $block = false): ?WorkerResult
+    {
+        do {
+            foreach ($this->workers as $worker) {
+                if (!$worker->isBusy()) {
+                    continue;
+                }
+                $outcome = $worker->collect(false);
+                if ($outcome !== null) {
+                    return new WorkerResult($worker, $outcome);
+                }
+            }
+
+            if (!$block || $this->busyCount() === 0) {
+                return null;
+            }
+
+            usleep(1000);
+        } while (true);
+    }
+
     /** @return list<Worker> */
     public function getWorkers(): array
     {
@@ -58,23 +95,37 @@ final class WorkerPool
         return count($this->workers);
     }
 
-    public function add(Worker $worker): void
-    {
-        $this->workers[] = $worker;
-    }
-
     /** @return list<Worker> */
     public function getDeadWorkers(): array
     {
         return array_values(array_filter(
             $this->workers,
-            static fn (Worker $worker): bool => $worker->getState() === WorkerState::DEAD,
+            static fn (Worker $worker): bool => $worker->isDead(),
         ));
     }
 
     public function hasDeadWorkers(): bool
     {
         return $this->getDeadWorkers() !== [];
+    }
+
+    public function replaceDeadWorkers(): int
+    {
+        $replaced = 0;
+        foreach ($this->workers as $i => $worker) {
+            if (!$worker->isDead()) {
+                continue;
+            }
+
+            $worker->shutdown();
+            $replacement = new Worker($worker->getId(), $this->handler);
+            $replacement->spawn();
+            $this->workers[$i] = $replacement;
+            $replaced++;
+            $this->metrics?->increment('worker_crashes');
+        }
+
+        return $replaced;
     }
 
     public function drain(): void
@@ -87,7 +138,7 @@ final class WorkerPool
     public function isDraining(): bool
     {
         foreach ($this->workers as $worker) {
-            if (!$worker->isDraining() && $worker->getState() !== WorkerState::DEAD) {
+            if (!$worker->isDraining() && !$worker->isDead()) {
                 return false;
             }
         }
@@ -95,20 +146,16 @@ final class WorkerPool
         return true;
     }
 
-    public function replaceDeadWorkers(): int
+    public function shutdown(): void
     {
-        $replaced = 0;
-        foreach ($this->workers as $i => $worker) {
-            if ($worker->getState() !== WorkerState::DEAD) {
-                continue;
-            }
-            $replacement = new Worker($worker->getId(), $this->handler);
-            $replacement->markReady();
-            $this->workers[$i] = $replacement;
-            $replaced++;
-            $this->metrics?->increment('worker_crashes');
+        foreach ($this->workers as $worker) {
+            $worker->shutdown();
         }
+        $this->workers = [];
+    }
 
-        return $replaced;
+    public function __destruct()
+    {
+        $this->shutdown();
     }
 }

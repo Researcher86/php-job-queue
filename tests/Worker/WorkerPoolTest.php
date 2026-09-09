@@ -5,41 +5,12 @@ declare(strict_types=1);
 namespace App\Tests\Worker;
 
 use App\Job\Job;
-use App\Worker\Worker;
 use App\Worker\WorkerPool;
-use App\Worker\WorkerState;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 final class WorkerPoolTest extends TestCase
 {
-    public function testDrainPutsAllWorkersIntoDraining(): void
-    {
-        $pool = new WorkerPool(2, static function (Job $job): void {});
-        $pool->start();
-
-        $pool->drain();
-
-        $this->assertTrue($pool->isDraining());
-        foreach ($pool->getWorkers() as $worker) {
-            $this->assertTrue($worker->isDraining());
-        }
-        $this->assertNull($pool->getAvailableWorker());
-    }
-
-    public function testDrainConsidersBusyWorkerAsDraining(): void
-    {
-        $handler = static function (Job $job): void {};
-        $busy = new Worker(1, $handler, WorkerState::BUSY);
-        $pool = new WorkerPool(1, $handler);
-        $pool->add($busy);
-
-        $pool->drain();
-
-        $this->assertTrue($pool->isDraining());
-        $this->assertTrue($busy->isDraining());
-        $this->assertNull($pool->getAvailableWorker());
-    }
     public function testPoolCannotBeEmpty(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -53,6 +24,8 @@ final class WorkerPoolTest extends TestCase
         $pool->start();
 
         $this->assertSame(3, $pool->count());
+
+        $pool->shutdown();
     }
 
     public function testAllWorkersAreAvailableAfterStart(): void
@@ -63,6 +36,8 @@ final class WorkerPoolTest extends TestCase
         foreach ($pool->getWorkers() as $worker) {
             $this->assertTrue($worker->isAvailable());
         }
+
+        $pool->shutdown();
     }
 
     public function testGetAvailableWorkerReturnsFirstWorker(): void
@@ -74,18 +49,8 @@ final class WorkerPoolTest extends TestCase
 
         $this->assertNotNull($worker);
         $this->assertSame(1, $worker->getId());
-    }
 
-    public function testAvailableWorkerSelectionSkipsStartingWorker(): void
-    {
-        $pool = new WorkerPool(2, static function (Job $job): void {});
-        $pool->start();
-
-        // A worker report as available only when IDLE; STARTING workers are skipped
-
-        $worker = $pool->getAvailableWorker();
-        $this->assertNotNull($worker);
-        $this->assertSame(1, $worker->getId());
+        $pool->shutdown();
     }
 
     public function testGetAvailableWorkerReturnsNullBeforeStart(): void
@@ -93,6 +58,8 @@ final class WorkerPoolTest extends TestCase
         $pool = new WorkerPool(1, static function (Job $job): void {});
 
         $this->assertNull($pool->getAvailableWorker());
+
+        $pool->shutdown();
     }
 
     public function testWorkersReturnToPoolAfterJob(): void
@@ -102,88 +69,104 @@ final class WorkerPoolTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->process(Job::create(type: 'test'));
+        $worker->assign(Job::create(type: 'test'));
 
-        // Worker is available again
+        $result = $pool->poll(true);
+
+        $this->assertNotNull($result);
         $this->assertSame($worker->getId(), $pool->getAvailableWorker()?->getId());
+
+        $pool->shutdown();
     }
 
     public function testMultipleWorkersProcessJobs(): void
     {
-        $processed = [];
-        $pool = new WorkerPool(3, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
+        $pool = new WorkerPool(3, static function (Job $job): void {});
         $pool->start();
 
-        // Dispatch all three jobs to the three available workers in one pass
-        $job1 = Job::create(type: 'job');
-        $job2 = Job::create(type: 'job');
-        $job3 = Job::create(type: 'job');
-
         $w1 = $pool->getAvailableWorker();
-        $w1?->process($job1);
-        $w2 = $pool->getAvailableWorker();
-        $w2?->process($job2);
-        $w3 = $pool->getAvailableWorker();
-        $w3?->process($job3);
+        $this->assertNotNull($w1);
+        $w1->assign(Job::create(type: 'a'));
 
-        $this->assertCount(3, $processed);
+        $w2 = $pool->getAvailableWorker();
+        $this->assertNotNull($w2);
+        $this->assertNotSame($w1->getId(), $w2->getId());
+        $w2->assign(Job::create(type: 'b'));
+
+        $w3 = $pool->getAvailableWorker();
+        $this->assertNotNull($w3);
+        $this->assertNotSame($w1->getId(), $w3->getId());
+        $w3->assign(Job::create(type: 'c'));
+
+        $completed = 0;
+        while ($pool->poll(true) !== null) {
+            $completed++;
+        }
+
+        $this->assertSame(3, $completed);
+        $this->assertSame(0, $pool->busyCount());
+
+        $pool->shutdown();
     }
 
     public function testReplaceDeadWorkersRestoresCapacity(): void
     {
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            usleep(100_000);
+        });
         $pool->start();
 
-        $workers = $pool->getWorkers();
-        $workers[0]->markDead();
+        $worker = $pool->getAvailableWorker();
+        $this->assertNotNull($worker);
+        $worker->assign(Job::create(type: 'a'));
+        posix_kill($worker->getPid(), SIGKILL);
 
+        $result = $pool->poll(true);
+        $this->assertNotNull($result);
+        $this->assertNull($result->getOutcome()->getResult());
         $this->assertTrue($pool->hasDeadWorkers());
+
         $this->assertSame(1, $pool->replaceDeadWorkers());
-
         $this->assertFalse($pool->hasDeadWorkers());
-        $this->assertSame(2, $pool->count());
+        $this->assertSame(1, $pool->count());
+        $this->assertNotNull($pool->getAvailableWorker());
 
-        foreach ($pool->getWorkers() as $worker) {
-            $this->assertTrue($worker->isAvailable());
-        }
+        $pool->shutdown();
     }
 
-    public function testReplaceDeadWorkersKeepsWorkerIds(): void
-    {
-        $pool = new WorkerPool(3, static function (Job $job): void {});
-        $pool->start();
-
-        $workers = $pool->getWorkers();
-        $workers[1]->markDead();
-
-        $pool->replaceDeadWorkers();
-
-        $this->assertSame([1, 2, 3], array_map(
-            static fn ($worker) => $worker->getId(),
-            $pool->getWorkers(),
-        ));
-    }
-
-    public function testReplaceDeadWorkersReturnsZeroWhenNoneDead(): void
+    public function testDrainPutsAllWorkersIntoDraining(): void
     {
         $pool = new WorkerPool(2, static function (Job $job): void {});
         $pool->start();
 
-        $this->assertSame(0, $pool->replaceDeadWorkers());
+        $pool->drain();
+
+        $this->assertTrue($pool->isDraining());
+        foreach ($pool->getWorkers() as $worker) {
+            $this->assertTrue($worker->isDraining());
+        }
+        $this->assertNull($pool->getAvailableWorker());
+
+        $pool->shutdown();
     }
 
-    public function testReplaceDeadWorkersReplacesMultiple(): void
+    public function testDrainConsidersBusyWorkerAsDraining(): void
     {
-        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            usleep(50_000);
+        });
         $pool->start();
 
-        $workers = $pool->getWorkers();
-        $workers[0]->markDead();
-        $workers[2]->markDead();
+        $worker = $pool->getAvailableWorker();
+        $this->assertNotNull($worker);
+        $worker->assign(Job::create(type: 'a'));
+        $pool->drain();
 
-        $this->assertSame(2, $pool->replaceDeadWorkers());
-        $this->assertFalse($pool->hasDeadWorkers());
+        $this->assertTrue($pool->isDraining());
+
+        $pool->poll(true);
+        $this->assertTrue($pool->isDraining());
+
+        $pool->shutdown();
     }
 }

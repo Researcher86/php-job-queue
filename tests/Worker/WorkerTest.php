@@ -12,172 +12,155 @@ use PHPUnit\Framework\TestCase;
 
 final class WorkerTest extends TestCase
 {
-    public function testWorkerStartsStarting(): void
+    public function testWorkerSpawnsProcess(): void
     {
         $worker = new Worker(1, static function (Job $job): void {});
+        $worker->spawn();
 
-        $this->assertSame(WorkerState::STARTING, $worker->getState());
-        $this->assertFalse($worker->isAvailable());
-    }
-
-    public function testWorkerBecomesIdleAfterReady(): void
-    {
-        $worker = new Worker(1, static function (Job $job): void {});
-        $worker->markReady();
-
+        $this->assertGreaterThan(0, $worker->getPid());
         $this->assertSame(WorkerState::IDLE, $worker->getState());
         $this->assertTrue($worker->isAvailable());
-    }
 
-    public function testWorkerBecomesBusyWhileProcessing(): void
-    {
-        $stateDuringProcessing = null;
-        $worker = new Worker(1, static function (Job $job) use (&$stateDuringProcessing, &$worker): void {
-            $stateDuringProcessing = $worker->getState();
-        });
-        $worker->markReady();
-
-        $worker->process(Job::create(type: 'test'));
-
-        $this->assertSame(WorkerState::BUSY, $stateDuringProcessing);
+        $worker->shutdown();
     }
 
     public function testWorkerProcessesJob(): void
     {
-        $processed = [];
-        $worker = new Worker(1, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
-        });
-        $worker->markReady();
-
-        $worker->process(Job::create(type: 'send_email'));
-
-        $this->assertSame(['send_email'], $processed);
-    }
-
-    public function testCurrentJobIsSetWhileProcessing(): void
-    {
-        $seen = null;
-        $worker = new Worker(1, static function (Job $job) use (&$seen, &$worker): void {
-            $seen = $worker->getCurrentJob();
-        });
-        $worker->markReady();
-
-        $job = Job::create(type: 'test');
-        $worker->process($job);
-
-        $this->assertSame($job->getId()->toString(), $seen?->getId()->toString());
-    }
-
-    public function testWorkerReturnsToIdleAfterJob(): void
-    {
         $worker = new Worker(1, static function (Job $job): void {});
-        $worker->markReady();
+        $worker->spawn();
 
-        $worker->process(Job::create(type: 'test'));
+        $job = Job::create(type: 'send_email');
+        $worker->assign($job);
+        $outcome = $worker->collect(true);
 
+        $this->assertNotNull($outcome);
+        $this->assertSame($job->getId()->toString(), $outcome->getJob()->getId()->toString());
+        $this->assertTrue($outcome->getResult()?->isSuccess());
         $this->assertSame(WorkerState::IDLE, $worker->getState());
-        $this->assertNull($worker->getCurrentJob());
-    }
 
-    public function testWorkerBecomesIdleEvenIfHandlerThrows(): void
-    {
-        $worker = new Worker(1, static function (Job $job): void {
-            throw new \RuntimeException('boom');
-        });
-        $worker->markReady();
-
-        $result = $worker->process(Job::create(type: 'test'));
-
-        $this->assertFalse($result->isSuccess());
-        $this->assertNotNull($result->getException());
-        $this->assertSame(WorkerState::IDLE, $worker->getState());
-    }
-
-    public function testWorkerReturnsSuccessResult(): void
-    {
-        $worker = new Worker(1, static function (Job $job): void {});
-        $worker->markReady();
-
-        $result = $worker->process(Job::create(type: 'test'));
-
-        $this->assertTrue($result->isSuccess());
-        $this->assertNull($result->getException());
+        $worker->shutdown();
     }
 
     public function testWorkerReturnsFailureResultWithException(): void
     {
-        $expected = new \RuntimeException('boom');
-        $worker = new Worker(1, static function (Job $job) use ($expected): void {
-            throw $expected;
+        $worker = new Worker(1, static function (Job $job): void {
+            throw new \RuntimeException('boom');
         });
-        $worker->markReady();
+        $worker->spawn();
 
-        $result = $worker->process(Job::create(type: 'test'));
+        $worker->assign(Job::create(type: 'test'));
+        $outcome = $worker->collect(true);
 
+        $this->assertNotNull($outcome);
+        $result = $outcome->getResult();
+        $this->assertNotNull($result);
         $this->assertFalse($result->isSuccess());
-        $this->assertSame($expected, $result->getException());
+        $this->assertSame('boom', $result->getException()->getMessage());
+
+        $worker->shutdown();
     }
 
-    public function testWorkerCannotProcessFromStarting(): void
+    public function testWorkerBecomesBusyWhileProcessing(): void
     {
-        $this->expectException(LogicException::class);
-        $this->expectExceptionMessage('Illegal transition: cannot work a worker in state STARTING');
-
         $worker = new Worker(1, static function (Job $job): void {});
-        $worker->process(Job::create(type: 'test'));
+        $worker->spawn();
+
+        $job = Job::create(type: 'test');
+        $worker->assign($job);
+
+        $this->assertSame(WorkerState::BUSY, $worker->getState());
+        $this->assertTrue($worker->isBusy());
+        $this->assertSame($job->getId()->toString(), $worker->getCurrentJob()?->getId()->toString());
+
+        $worker->collect(true);
+        $this->assertSame(WorkerState::IDLE, $worker->getState());
+        $this->assertNull($worker->getCurrentJob());
+
+        $worker->shutdown();
     }
 
-    public function testWorkerCannotBeReadyTwice(): void
+    public function testWorkerCannotAssignTwice(): void
     {
         $this->expectException(LogicException::class);
 
         $worker = new Worker(1, static function (Job $job): void {});
-        $worker->markReady();
-        $worker->markReady();
+        $worker->spawn();
+
+        $worker->assign(Job::create(type: 'a'));
+        $worker->assign(Job::create(type: 'b'));
+
+        $worker->shutdown();
+    }
+
+    public function testWorkerCannotAssignBeforeSpawn(): void
+    {
+        $this->expectException(LogicException::class);
+
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->assign(Job::create(type: 'a'));
+    }
+
+    public function testWorkerCrashIsDetected(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {
+            usleep(100_000);
+        });
+        $worker->spawn();
+
+        $job = Job::create(type: 'test');
+        $worker->assign($job);
+        posix_kill($worker->getPid(), SIGKILL);
+
+        $outcome = $worker->collect(true);
+
+        $this->assertNotNull($outcome);
+        $this->assertNull($outcome->getResult());
+        $this->assertTrue($worker->isDead());
+        $this->assertSame($job->getId()->toString(), $outcome->getJob()->getId()->toString());
+
+        $worker->shutdown();
     }
 
     public function testWorkerGetId(): void
     {
         $worker = new Worker(7, static function (Job $job): void {});
+        $worker->spawn();
 
         $this->assertSame(7, $worker->getId());
+
+        $worker->shutdown();
     }
 
-    public function testIdleWorkerEntersDrainingOnDrain(): void
+    public function testIdleWorkerStopsOnDrain(): void
     {
         $worker = new Worker(1, static function (Job $job): void {});
-        $worker->markReady();
+        $worker->spawn();
 
         $worker->drain();
-
-        $this->assertSame(WorkerState::DRAINING, $worker->getState());
-        $this->assertTrue($worker->isDraining());
-        $this->assertFalse($worker->isAvailable());
-    }
-
-    public function testBusyWorkerEntersStoppingAfterFinishingJob(): void
-    {
-        $worker = new Worker(1, static function (Job $job) use (&$worker): void {
-            // Drain is requested while the worker is still busy
-            $worker->drain();
-        });
-        $worker->markReady();
-
-        $worker->process(Job::create(type: 'test'));
 
         $this->assertSame(WorkerState::STOPPING, $worker->getState());
         $this->assertTrue($worker->isDraining());
+        $this->assertFalse($worker->isAvailable());
+
+        $worker->shutdown();
     }
 
-    public function testDrainingWorkerCannotProcessNewJob(): void
+    public function testBusyWorkerStopsAfterFinishingJob(): void
     {
-        $this->expectException(LogicException::class);
+        $worker = new Worker(1, static function (Job $job): void {
+            usleep(50_000);
+        });
+        $worker->spawn();
 
-        $worker = new Worker(1, static function (Job $job): void {});
-        $worker->markReady();
+        $worker->assign(Job::create(type: 'test'));
         $worker->drain();
 
-        $worker->process(Job::create(type: 'test'));
+        $outcome = $worker->collect(true);
+
+        $this->assertNotNull($outcome);
+        $this->assertSame(WorkerState::STOPPING, $worker->getState());
+        $this->assertTrue($worker->isDraining());
+
+        $worker->shutdown();
     }
 }

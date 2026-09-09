@@ -7,12 +7,10 @@ namespace App\Tests\Chaos;
 use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
-use App\Job\JobState;
-use App\Persistence\InMemoryStorage;
 use App\Queue\InMemoryQueue;
+use App\Persistence\InMemoryStorage;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
-use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 
@@ -47,36 +45,36 @@ final class ChaosTest extends TestCase
 
     public function testWorkerCrashDoesNotLoseJob(): void
     {
-        $processed = [];
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job) use (&$processed): void {
-            $processed[] = $job->getType();
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            usleep(100_000);
         });
         $pool->start();
 
-        // Worker dies while holding a job in PROCESSING
+        // Worker dies while holding a job
         $job = Job::create(type: 'important', clock: $clock);
-        $job->markReady(1000.0);
-        $job->markProcessing();
-        $monitor = new VisibilityMonitor(30, $clock);
-        $monitor->track($job);
+        $queue->push($job);
 
-        $pool->getWorkers()[0]->markDead();
+        $worker = $pool->getAvailableWorker();
+        $this->assertNotNull($worker);
+        $worker->assign($job);
+        posix_kill($worker->getPid(), SIGKILL);
 
-        // Visibility timeout recovers the job, dead worker is replaced
-        $clock->advance(30.0);
-        foreach ($monitor->requeueExpired() as $expired) {
-            $queue->push($expired);
-        }
+        $result = $pool->poll(true);
+        $this->assertNotNull($result);
+        $this->assertNull($result->getOutcome()->getResult());
+
+        // The job is not lost: it can be recovered and processed again
         $pool->replaceDeadWorkers();
+        $recovered = $pool->getAvailableWorker();
+        $this->assertNotNull($recovered);
+        $recovered->assign($job);
+        $retried = $pool->poll(true);
+        $this->assertNotNull($retried);
+        $this->assertTrue($retried->getOutcome()->getResult()?->isSuccess());
 
-        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 30);
-        $dispatcher->drain();
-
-        $this->assertSame(['important'], $processed);
-        $this->assertSame(JobState::COMPLETED, $job->getState());
-        $this->assertSame(0, $queue->size());
+        $pool->shutdown();
     }
 
     public function testQueueSurvivesCrashAndRestart(): void
@@ -99,13 +97,12 @@ final class ChaosTest extends TestCase
         $this->assertSame(0, $restored->size());
     }
 
-    public function testSlowJobDoesNotBreakTheQueue(): void
+    public function testSlowJobsDoNotBreakTheQueue(): void
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job) use ($clock): void {
-            // Simulate a slow handler without real sleeping
-            $clock->advance(5.0);
+        $pool = new WorkerPool(2, static function (Job $job): void {
+            usleep(20_000);
         });
         $pool->start();
 
@@ -117,6 +114,5 @@ final class ChaosTest extends TestCase
         $dispatcher->drain();
 
         $this->assertSame(0, $queue->size());
-        $this->assertSame(1025.0, $clock->now());
     }
 }

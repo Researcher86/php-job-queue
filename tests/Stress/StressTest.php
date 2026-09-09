@@ -6,7 +6,6 @@ namespace App\Tests\Stress;
 
 use App\Dispatcher\JobDispatcher;
 use App\Job\Job;
-use App\Job\JobState;
 use App\Metrics\MetricsCollector;
 use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
@@ -17,33 +16,31 @@ final class StressTest extends TestCase
 {
     public function testThousandJobsCompleteThroughDispatcher(): void
     {
-        $processed = 0;
+        $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(8, static function (Job $job) use (&$processed): void {
-            $processed++;
-        });
+        $pool = new WorkerPool(8, static function (Job $job): void {});
         $pool->start();
 
         for ($i = 0; $i < 1000; $i++) {
             $queue->push(Job::create(type: "job-$i", clock: $clock));
         }
 
-        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, metrics: $metrics);
         $dispatched = $dispatcher->drain();
 
         $this->assertSame(1000, $dispatched);
-        $this->assertSame(1000, $processed);
+        $this->assertSame(1000, $metrics->getCounter('completed'));
         $this->assertSame(0, $queue->size());
     }
 
     public function testThousandJobsWithMetricsStayConsistent(): void
     {
+        $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(8, static function (Job $job): void {});
         $pool->start();
-        $metrics = new MetricsCollector();
 
         for ($i = 0; $i < 1000; $i++) {
             $queue->push(Job::create(type: "job-$i", clock: $clock));
@@ -61,6 +58,7 @@ final class StressTest extends TestCase
 
     public function testMixedOutcomesBalanceMetrics(): void
     {
+        $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(8, static function (Job $job): void {
@@ -69,7 +67,6 @@ final class StressTest extends TestCase
             }
         });
         $pool->start();
-        $metrics = new MetricsCollector();
 
         for ($i = 0; $i < 500; $i++) {
             $queue->push(Job::create(type: 'ok', clock: $clock));
@@ -83,6 +80,29 @@ final class StressTest extends TestCase
 
         $this->assertSame(500, $metrics->getCounter('completed'));
         $this->assertSame(500, $metrics->getCounter('failed'));
+        $this->assertSame(0, $queue->size());
+    }
+
+    public function testForkedWorkersProcessJobsInParallel(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(2, static function (Job $job): void {
+            usleep(300_000);
+        });
+        $pool->start();
+
+        $queue->push(Job::create(type: 'a', clock: $clock));
+        $queue->push(Job::create(type: 'b', clock: $clock));
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+
+        $started = microtime(true);
+        $dispatcher->drain();
+        $elapsed = microtime(true) - $started;
+
+        // Two 300ms jobs on two workers finish in ~300ms, not ~600ms
+        $this->assertLessThan(0.55, $elapsed);
         $this->assertSame(0, $queue->size());
     }
 }
