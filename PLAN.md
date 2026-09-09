@@ -935,8 +935,8 @@ interface RetryPolicy
 * [x] Failed job retries
 * [x] Attempts increase
 * [x] Max attempts respected
-* [ ] Successful retry completes job
-* [ ] Failed final attempt goes to DLQ
+* [x] Successful retry completes job
+* [x] Failed final attempt goes to DLQ
 
 ---
 
@@ -1130,9 +1130,9 @@ delete()
 
 ### Tests
 
-* [ ] Exhausted job enters DLQ
-* [ ] Failure information preserved
-* [ ] DLQ job can be retried manually
+* [x] Exhausted job enters DLQ
+* [x] Failure information preserved
+* [x] DLQ job can be retried manually
 
 ---
 

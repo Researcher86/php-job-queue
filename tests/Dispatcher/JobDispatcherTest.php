@@ -7,6 +7,7 @@ namespace App\Tests\Dispatcher;
 use App\Job\Job;
 use App\Job\JobState;
 use App\Dispatcher\JobDispatcher;
+use App\DLQ\DeadLetterQueue;
 use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
@@ -88,6 +89,26 @@ final class JobDispatcherTest extends TestCase
 
         $this->assertSame(2, $attempts);
         $this->assertSame(JobState::FAILED, $job->getState());
+        $this->assertSame(0, $queue->size());
+    }
+
+    public function testSuccessfulRetryCompletesJob(): void
+    {
+        $attempts = 0;
+        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$attempts): void {
+            $attempts++;
+            if ($attempts === 1) {
+                throw new \RuntimeException('boom');
+            }
+        }, new FixedDelayRetry(0));
+
+        $job = Job::create(type: 'flaky', maxAttempts: 3);
+        $queue->push($job);
+
+        $dispatcher->drain();
+
+        $this->assertSame(2, $attempts);
+        $this->assertSame(JobState::COMPLETED, $job->getState());
         $this->assertSame(0, $queue->size());
     }
 
@@ -238,5 +259,30 @@ final class JobDispatcherTest extends TestCase
 
         $this->assertSame(['a'], $processed);
         $this->assertSame(JobState::COMPLETED, $job->getState());
+    }
+
+    public function testExhaustedJobIsSentToDeadLetterQueue(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new \RuntimeException('boom');
+        });
+        $pool->start();
+        $dlq = new DeadLetterQueue($clock);
+
+        $job = Job::create(type: 'bad', maxAttempts: 2);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, new FixedDelayRetry(0), $clock, dlq: $dlq);
+        $dispatcher->drain();
+
+        $this->assertSame(JobState::FAILED, $job->getState());
+        $this->assertSame(1, $dlq->size());
+        $this->assertTrue($dlq->contains($job));
+        $record = $dlq->find($job->getId()->toString());
+        $this->assertNotNull($record);
+        $this->assertSame('boom', $record->getException()->getMessage());
+        $this->assertSame(2, $record->getAttempts());
     }
 }

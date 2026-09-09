@@ -138,6 +138,15 @@ final class Job
         $this->state = JobState::FAILED;
     }
 
+    public function markRequeued(float $availableAt): void
+    {
+        if ($this->state !== JobState::FAILED) {
+            throw $this->illegalTransition(JobState::READY);
+        }
+        $this->state = JobState::READY;
+        $this->availableAt = $availableAt;
+    }
+
     public function markRetry(float $availableAt): void
     {
         if ($this->state !== JobState::PROCESSING) {
