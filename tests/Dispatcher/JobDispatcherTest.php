@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace App\Tests\Dispatcher;
 
 use App\Job\Job;
+use App\Job\JobPriority;
 use App\Job\JobState;
 use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Queue\InMemoryQueue;
+use App\Queue\PriorityQueue;
 use App\Persistence\FileStorage;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
@@ -379,5 +381,25 @@ final class JobDispatcherTest extends TestCase
                 unlink($path);
             }
         }
+    }
+
+    public function testDispatcherServesHigherPriorityJobsFirst(): void
+    {
+        $processed = [];
+        $clock = new FakeClock(1000.0);
+        $queue = new PriorityQueue($clock);
+        $pool = new WorkerPool(2, static function (Job $job) use (&$processed): void {
+            $processed[] = $job->getType();
+        });
+        $pool->start();
+
+        $queue->push(Job::create(type: 'low', priority: JobPriority::LOW));
+        $queue->push(Job::create(type: 'high', priority: JobPriority::HIGH));
+        $queue->push(Job::create(type: 'normal', priority: JobPriority::NORMAL));
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $dispatcher->drain();
+
+        $this->assertSame(['high', 'normal', 'low'], $processed);
     }
 }

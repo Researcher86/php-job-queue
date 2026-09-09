@@ -25,6 +25,7 @@ final class Job
         private readonly array $payload,
         private readonly int $maxAttempts,
         private readonly float $createdAt,
+        private readonly JobPriority $priority,
         JobState $state,
         int $attempts = 0,
         ?float $availableAt = null,
@@ -42,6 +43,7 @@ final class Job
         array $payload = [],
         int $maxAttempts = 3,
         ?Clock $clock = null,
+        JobPriority $priority = JobPriority::NORMAL,
     ): self {
         $clock ??= new SystemClock();
 
@@ -51,6 +53,7 @@ final class Job
             payload: $payload,
             maxAttempts: $maxAttempts,
             createdAt: $clock->now(),
+            priority: $priority,
             state: JobState::CREATED,
         );
     }
@@ -86,6 +89,11 @@ final class Job
         return $this->maxAttempts;
     }
 
+    public function getPriority(): JobPriority
+    {
+        return $this->priority;
+    }
+
     public function getCreatedAt(): float
     {
         return $this->createdAt;
@@ -108,6 +116,7 @@ final class Job
             'maxAttempts' => $this->maxAttempts,
             'createdAt' => $this->createdAt,
             'availableAt' => $this->availableAt,
+            'priority' => $this->priority->name,
         ];
     }
 
@@ -122,6 +131,7 @@ final class Job
             payload: (array) $data['payload'],
             maxAttempts: (int) $data['maxAttempts'],
             createdAt: (float) $data['createdAt'],
+            priority: JobPriority::fromName((string) ($data['priority'] ?? 'NORMAL')),
             state: JobState::fromName((string) $data['state']),
             attempts: (int) $data['attempts'],
             availableAt: $data['availableAt'] !== null ? (float) $data['availableAt'] : null,
