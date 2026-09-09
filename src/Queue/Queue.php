@@ -8,9 +8,9 @@ use App\Job\Job;
 
 interface Queue
 {
-    public function push(Job $job): void;
+    public function push(Job $job, int $delay = 0): void;
 
-    public function pop(): ?Job;
+    public function pop(?float $now = null): ?Job;
 
     public function size(): int;
 }

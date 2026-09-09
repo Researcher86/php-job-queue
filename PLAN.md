@@ -991,9 +991,9 @@ Sorted timestamps
 
 ### Tests
 
-* [ ] Delayed job is not immediately available
-* [ ] Job becomes available at correct time
-* [ ] Multiple delayed jobs preserve schedule
+* [x] Delayed job is not immediately available
+* [x] Job becomes available at correct time
+* [x] Multiple delayed jobs preserve schedule
 
 ---
 

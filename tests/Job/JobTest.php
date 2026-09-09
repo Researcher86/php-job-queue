@@ -47,6 +47,26 @@ final class JobTest extends TestCase
         $this->assertSame(1000.0, $job->getAvailableAt());
     }
 
+    public function testJobBecomesDelayed(): void
+    {
+        $job = Job::create(type: 'test');
+
+        $job->markDelayed(1060.0);
+
+        $this->assertSame(JobState::DELAYED, $job->getState());
+        $this->assertSame(1060.0, $job->getAvailableAt());
+    }
+
+    public function testDelayedJobBecomesReady(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markDelayed(1060.0);
+
+        $job->markReady(1060.0);
+
+        $this->assertSame(JobState::READY, $job->getState());
+    }
+
     public function testJobBecomesProcessing(): void
     {
         $job = Job::create(type: 'test');

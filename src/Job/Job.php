@@ -96,11 +96,20 @@ final class Job
 
     public function markReady(float $now): void
     {
-        if ($this->state !== JobState::CREATED) {
+        if ($this->state !== JobState::CREATED && $this->state !== JobState::DELAYED) {
             throw $this->illegalTransition(JobState::READY);
         }
         $this->state = JobState::READY;
         $this->availableAt = $now;
+    }
+
+    public function markDelayed(float $availableAt): void
+    {
+        if ($this->state !== JobState::CREATED) {
+            throw $this->illegalTransition(JobState::DELAYED);
+        }
+        $this->state = JobState::DELAYED;
+        $this->availableAt = $availableAt;
     }
 
     public function markProcessing(): void

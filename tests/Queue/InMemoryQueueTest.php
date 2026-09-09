@@ -100,4 +100,68 @@ final class InMemoryQueueTest extends TestCase
 
         $this->assertSame(JobState::READY, $job->getState());
     }
+
+    public function testDelayedJobIsNotImmediatelyAvailable(): void
+    {
+        $job = Job::create(type: 'a');
+
+        $this->queue->push($job, delay: 60);
+
+        $this->assertSame(JobState::DELAYED, $job->getState());
+        $this->assertNull($this->queue->pop());
+        $this->assertSame(1, $this->queue->size());
+    }
+
+    public function testDelayedJobBecomesAvailableAtCorrectTime(): void
+    {
+        $job = Job::create(type: 'a');
+        $this->queue->push($job, delay: 60);
+
+        $this->assertNull($this->queue->pop());
+
+        $this->clock->advance(60.0);
+        $popped = $this->queue->pop();
+
+        $this->assertNotNull($popped);
+        $this->assertSame($job->getId()->toString(), $popped->getId()->toString());
+        $this->assertSame(JobState::READY, $job->getState());
+    }
+
+    public function testDelayedJobNotAvailableBeforeDeadline(): void
+    {
+        $job = Job::create(type: 'a');
+        $this->queue->push($job, delay: 60);
+
+        $this->clock->advance(59.0);
+
+        $this->assertNull($this->queue->pop());
+    }
+
+    public function testMultipleDelayedJobsPreserveSchedule(): void
+    {
+        $short = Job::create(type: 'short');
+        $long = Job::create(type: 'long');
+
+        $this->queue->push($short, delay: 10);
+        $this->queue->push($long, delay: 20);
+
+        $this->clock->advance(10.0);
+        $this->assertSame('short', $this->queue->pop()?->getType());
+
+        $this->assertNull($this->queue->pop());
+
+        $this->clock->advance(10.0);
+        $this->assertSame('long', $this->queue->pop()?->getType());
+    }
+
+    public function testDelayedAndReadyJobsMixOnPop(): void
+    {
+        $this->queue->push(Job::create(type: 'ready_first'), delay: 0);
+        $this->queue->push(Job::create(type: 'delayed'), delay: 60);
+
+        $this->assertSame('ready_first', $this->queue->pop()?->getType());
+
+        $this->clock->advance(60.0);
+        $this->assertSame('delayed', $this->queue->pop()?->getType());
+    }
 }

@@ -7,6 +7,7 @@ namespace App\Job;
 enum JobState
 {
     case CREATED;
+    case DELAYED;
     case READY;
     case PROCESSING;
     case COMPLETED;
