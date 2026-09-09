@@ -12,6 +12,7 @@ use App\Support\SystemClock;
 use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use App\DLQ\DeadLetterQueue;
+use App\Metrics\MetricsCollector;
 use App\Persistence\JobStorage;
 use Throwable;
 
@@ -27,6 +28,7 @@ final readonly class JobDispatcher
         ?int $visibilityTimeout = null,
         private ?DeadLetterQueue $dlq = null,
         private ?JobStorage $storage = null,
+        private ?MetricsCollector $metrics = null,
     ) {
         $this->monitor = new VisibilityMonitor($visibilityTimeout ?? 0, $clock);
     }
@@ -47,12 +49,17 @@ final readonly class JobDispatcher
 
         $job->markProcessing();
         $this->monitor->track($job);
+
+        $startedAt = $this->clock->now();
         $result = $worker->process($job);
+        $this->metrics?->recordLatency('execution', $this->clock->now() - $startedAt);
         $this->monitor->release($job);
 
         if ($result->isSuccess()) {
             $job->markCompleted();
             $this->persist($job);
+            $this->metrics?->increment('completed');
+            $this->metrics?->recordLatency('end_to_end', $this->clock->now() - $job->getCreatedAt());
         } else {
             $this->handleFailure($job, $result->getException());
         }
@@ -93,13 +100,16 @@ final readonly class JobDispatcher
             $job->markRetry($this->clock->now() + $delay);
             $this->queue->push($job);
             $this->persist($job);
+            $this->metrics?->increment('retried');
             return;
         }
 
         $job->markFailed();
         $this->persist($job);
+        $this->metrics?->increment('failed');
         if ($this->dlq !== null && $exception !== null) {
             $this->dlq->add($job, $exception);
+            $this->metrics?->increment('dlq');
         }
     }
 

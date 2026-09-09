@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Worker;
 
 use App\Job\Job;
+use App\Metrics\MetricsCollector;
 use Closure;
 use InvalidArgumentException;
 
@@ -19,6 +20,7 @@ final class WorkerPool
     public function __construct(
         private readonly int $size,
         private readonly Closure $handler,
+        private readonly ?MetricsCollector $metrics = null,
     ) {
         if ($size < 1) {
             throw new InvalidArgumentException('A worker pool needs at least one worker');
@@ -86,6 +88,7 @@ final class WorkerPool
             $replacement->markReady();
             $this->workers[$i] = $replacement;
             $replaced++;
+            $this->metrics?->increment('worker_crashes');
         }
 
         return $replaced;

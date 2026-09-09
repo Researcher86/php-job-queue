@@ -9,6 +9,7 @@ use App\Job\JobPriority;
 use App\Job\JobState;
 use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
+use App\Metrics\MetricsCollector;
 use App\Queue\InMemoryQueue;
 use App\Queue\PriorityQueue;
 use App\Persistence\FileStorage;
@@ -401,5 +402,59 @@ final class JobDispatcherTest extends TestCase
         $dispatcher->drain();
 
         $this->assertSame(['high', 'normal', 'low'], $processed);
+    }
+
+    public function testMetricsCountCompletedAndLatency(): void
+    {
+        $metrics = new MetricsCollector();
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {}, $metrics);
+        $pool->start();
+
+        $queue->push(Job::create(type: 'a', clock: $clock));
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, metrics: $metrics);
+        $dispatcher->drain();
+
+        $this->assertSame(1, $metrics->getCounter('completed'));
+        $this->assertNotNull($metrics->getLatencyStats('execution'));
+        $this->assertNotNull($metrics->getLatencyStats('end_to_end'));
+    }
+
+    public function testMetricsCountRetriesAndDlq(): void
+    {
+        $metrics = new MetricsCollector();
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new \RuntimeException('boom');
+        });
+        $pool->start();
+        $dlq = new DeadLetterQueue($clock);
+
+        $job = Job::create(type: 'bad', maxAttempts: 2);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, new FixedDelayRetry(0), $clock, dlq: $dlq, metrics: $metrics);
+        $dispatcher->drain();
+
+        $this->assertSame(1, $metrics->getCounter('retried'));
+        $this->assertSame(1, $metrics->getCounter('failed'));
+        $this->assertSame(1, $metrics->getCounter('dlq'));
+    }
+
+    public function testMetricsCountWorkerCrashes(): void
+    {
+        $metrics = new MetricsCollector();
+        $pool = new WorkerPool(2, static function (Job $job): void {}, $metrics);
+        $pool->start();
+
+        $workers = $pool->getWorkers();
+        $workers[0]->markDead();
+
+        $pool->replaceDeadWorkers();
+
+        $this->assertSame(1, $metrics->getCounter('worker_crashes'));
     }
 }
