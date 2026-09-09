@@ -9,19 +9,27 @@ use App\Queue\Queue;
 use App\Retry\RetryPolicy;
 use App\Support\Clock;
 use App\Support\SystemClock;
+use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 
 final readonly class JobDispatcher
 {
+    private VisibilityMonitor $monitor;
+
     public function __construct(
         private Queue $queue,
         private WorkerPool $workerPool,
         private ?RetryPolicy $retryPolicy = null,
         private Clock $clock = new SystemClock(),
-    ) {}
+        ?int $visibilityTimeout = null,
+    ) {
+        $this->monitor = new VisibilityMonitor($visibilityTimeout ?? 0, $clock);
+    }
 
     public function dispatchNext(): bool
     {
+        $this->requeueExpired();
+
         $worker = $this->workerPool->getAvailableWorker();
         if ($worker === null) {
             return false;
@@ -33,7 +41,9 @@ final readonly class JobDispatcher
         }
 
         $job->markProcessing();
+        $this->monitor->track($job);
         $result = $worker->process($job);
+        $this->monitor->release($job);
 
         if ($result->isSuccess()) {
             $job->markCompleted();
@@ -52,6 +62,22 @@ final readonly class JobDispatcher
         }
 
         return $dispatched;
+    }
+
+    public function requeueExpired(): int
+    {
+        $count = 0;
+        foreach ($this->monitor->requeueExpired() as $expired) {
+            $this->queue->push($expired);
+            $count++;
+        }
+
+        return $count;
+    }
+
+    public function isProcessing(Job $job): bool
+    {
+        return $this->monitor->isProcessing($job);
     }
 
     private function handleFailure(Job $job): void

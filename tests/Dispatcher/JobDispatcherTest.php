@@ -10,6 +10,7 @@ use App\Dispatcher\JobDispatcher;
 use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
+use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use Closure;
 use PHPUnit\Framework\TestCase;
@@ -207,5 +208,35 @@ final class JobDispatcherTest extends TestCase
         $this->assertFalse($dispatcher->dispatchNext());
         // The job was not popped from the queue
         $this->assertSame(1, $queue->size());
+    }
+
+    public function testExpiredProcessingJobReturnsToQueueAndRunsAgain(): void
+    {
+        $processed = [];
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job) use (&$processed): void {
+            $processed[] = $job->getType();
+        });
+        $pool->start();
+
+        // Simulate a job that was left in PROCESSING by a crashed worker
+        $job = Job::create(type: 'a');
+        $job->markReady(1000.0);
+        $job->markProcessing();
+        $monitor = new VisibilityMonitor(30, $clock);
+        $monitor->track($job);
+
+        $clock->advance(30.0);
+        $expired = $monitor->requeueExpired();
+        foreach ($expired as $expiredJob) {
+            $queue->push($expiredJob);
+        }
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $dispatcher->drain();
+
+        $this->assertSame(['a'], $processed);
+        $this->assertSame(JobState::COMPLETED, $job->getState());
     }
 }
