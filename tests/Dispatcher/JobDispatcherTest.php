@@ -285,4 +285,42 @@ final class JobDispatcherTest extends TestCase
         $this->assertSame('boom', $record->getException()->getMessage());
         $this->assertSame(2, $record->getAttempts());
     }
+
+    public function testDeadWorkerIsReplacedAndJobRunsAgain(): void
+    {
+        $processed = [];
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job) use (&$processed): void {
+            $processed[] = $job->getType();
+        });
+        $pool->start();
+
+        // Simulate a worker dying while holding a job
+        $job = Job::create(type: 'a');
+        $job->markReady(1000.0);
+        $job->markProcessing();
+        $monitor = new VisibilityMonitor(30, $clock);
+        $monitor->track($job);
+
+        $worker = $pool->getWorkers()[0];
+        $worker->markDead();
+
+        // Visibility timeout returns the job to READY
+        $clock->advance(30.0);
+        foreach ($monitor->requeueExpired() as $expired) {
+            $queue->push($expired);
+        }
+
+        // Replace the dead worker and process the job again
+        $pool->replaceDeadWorkers();
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 30);
+        $dispatcher->drain();
+
+        $this->assertSame(['a'], $processed);
+        $this->assertSame(JobState::COMPLETED, $job->getState());
+        $this->assertFalse($pool->hasDeadWorkers());
+        $this->assertSame(1, $pool->count());
+    }
 }

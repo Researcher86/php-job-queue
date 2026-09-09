@@ -60,4 +60,34 @@ final class WorkerPool
     {
         $this->workers[] = $worker;
     }
+
+    /** @return list<Worker> */
+    public function getDeadWorkers(): array
+    {
+        return array_values(array_filter(
+            $this->workers,
+            static fn (Worker $worker): bool => $worker->getState() === WorkerState::DEAD,
+        ));
+    }
+
+    public function hasDeadWorkers(): bool
+    {
+        return $this->getDeadWorkers() !== [];
+    }
+
+    public function replaceDeadWorkers(): int
+    {
+        $replaced = 0;
+        foreach ($this->workers as $i => $worker) {
+            if ($worker->getState() !== WorkerState::DEAD) {
+                continue;
+            }
+            $replacement = new Worker($worker->getId(), $this->handler);
+            $replacement->markReady();
+            $this->workers[$i] = $replacement;
+            $replaced++;
+        }
+
+        return $replaced;
+    }
 }

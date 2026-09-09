@@ -6,6 +6,7 @@ namespace App\Tests\Worker;
 
 use App\Job\Job;
 use App\Worker\WorkerPool;
+use App\Worker\WorkerState;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
@@ -100,5 +101,61 @@ final class WorkerPoolTest extends TestCase
         $w3?->process($job3);
 
         $this->assertCount(3, $processed);
+    }
+
+    public function testReplaceDeadWorkersRestoresCapacity(): void
+    {
+        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool->start();
+
+        $workers = $pool->getWorkers();
+        $workers[0]->markDead();
+
+        $this->assertTrue($pool->hasDeadWorkers());
+        $this->assertSame(1, $pool->replaceDeadWorkers());
+
+        $this->assertFalse($pool->hasDeadWorkers());
+        $this->assertSame(2, $pool->count());
+
+        foreach ($pool->getWorkers() as $worker) {
+            $this->assertTrue($worker->isAvailable());
+        }
+    }
+
+    public function testReplaceDeadWorkersKeepsWorkerIds(): void
+    {
+        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool->start();
+
+        $workers = $pool->getWorkers();
+        $workers[1]->markDead();
+
+        $pool->replaceDeadWorkers();
+
+        $this->assertSame([1, 2, 3], array_map(
+            static fn ($worker) => $worker->getId(),
+            $pool->getWorkers(),
+        ));
+    }
+
+    public function testReplaceDeadWorkersReturnsZeroWhenNoneDead(): void
+    {
+        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool->start();
+
+        $this->assertSame(0, $pool->replaceDeadWorkers());
+    }
+
+    public function testReplaceDeadWorkersReplacesMultiple(): void
+    {
+        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool->start();
+
+        $workers = $pool->getWorkers();
+        $workers[0]->markDead();
+        $workers[2]->markDead();
+
+        $this->assertSame(2, $pool->replaceDeadWorkers());
+        $this->assertFalse($pool->hasDeadWorkers());
     }
 }

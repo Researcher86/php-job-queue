@@ -1209,9 +1209,9 @@ READY
 
 * [ ] Kill worker while idle
 * [ ] Kill worker while busy
-* [ ] Worker is replaced
-* [ ] Job returns to queue
-* [ ] Job can execute again
+* [x] Worker is replaced
+* [x] Job returns to queue
+* [x] Job can execute again
 
 ---
 
