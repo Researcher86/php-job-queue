@@ -20,4 +20,9 @@ enum JobState
             default => false,
         };
     }
+
+    public static function fromName(string $name): self
+    {
+        return constant("self::$name");
+    }
 }

@@ -26,10 +26,12 @@ final class Job
         private readonly int $maxAttempts,
         private readonly float $createdAt,
         JobState $state,
+        int $attempts = 0,
+        ?float $availableAt = null,
     ) {
         $this->state = $state;
-        $this->attempts = 0;
-        $this->availableAt = null;
+        $this->attempts = $attempts;
+        $this->availableAt = $availableAt;
     }
 
     /**
@@ -92,6 +94,38 @@ final class Job
     public function getAvailableAt(): ?float
     {
         return $this->availableAt;
+    }
+
+    /** @return array<string, mixed> */
+    public function toArray(): array
+    {
+        return [
+            'id' => $this->id->toString(),
+            'type' => $this->type,
+            'payload' => $this->payload,
+            'state' => $this->state->name,
+            'attempts' => $this->attempts,
+            'maxAttempts' => $this->maxAttempts,
+            'createdAt' => $this->createdAt,
+            'availableAt' => $this->availableAt,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            id: JobId::fromString((string) $data['id']),
+            type: (string) $data['type'],
+            payload: (array) $data['payload'],
+            maxAttempts: (int) $data['maxAttempts'],
+            createdAt: (float) $data['createdAt'],
+            state: JobState::fromName((string) $data['state']),
+            attempts: (int) $data['attempts'],
+            availableAt: $data['availableAt'] !== null ? (float) $data['availableAt'] : null,
+        );
     }
 
     public function markReady(float $now): void

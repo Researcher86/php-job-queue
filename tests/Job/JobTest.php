@@ -236,4 +236,23 @@ final class JobTest extends TestCase
 
         $this->assertSame(3, $job->getMaxAttempts());
     }
+
+    public function testJobRoundTripsThroughArray(): void
+    {
+        $job = Job::create(type: 'send_email', payload: ['email' => 'user@example.com'], maxAttempts: 5);
+        $job->markReady(1000.0);
+        $job->markProcessing();
+        $job->markRetry(1060.0);
+
+        $restored = Job::fromArray($job->toArray());
+
+        $this->assertSame($job->getId()->toString(), $restored->getId()->toString());
+        $this->assertSame($job->getType(), $restored->getType());
+        $this->assertSame($job->getPayload(), $restored->getPayload());
+        $this->assertSame($job->getState(), $restored->getState());
+        $this->assertSame($job->getAttempts(), $restored->getAttempts());
+        $this->assertSame($job->getMaxAttempts(), $restored->getMaxAttempts());
+        $this->assertSame($job->getCreatedAt(), $restored->getCreatedAt());
+        $this->assertSame($job->getAvailableAt(), $restored->getAvailableAt());
+    }
 }

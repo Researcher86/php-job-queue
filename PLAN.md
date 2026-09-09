@@ -1304,10 +1304,10 @@ This is an excellent educational exercise.
 
 ### Tests
 
-* [ ] Queue survives restart
-* [ ] Ready jobs restored
-* [ ] Delayed jobs restored
-* [ ] Processing jobs handled correctly after restart
+* [x] Queue survives restart
+* [x] Ready jobs restored
+* [x] Delayed jobs restored
+* [x] Processing jobs handled correctly after restart
 
 ---
 

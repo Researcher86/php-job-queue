@@ -9,6 +9,7 @@ use App\Job\JobState;
 use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Queue\InMemoryQueue;
+use App\Persistence\FileStorage;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
 use App\Timeout\VisibilityMonitor;
@@ -322,5 +323,61 @@ final class JobDispatcherTest extends TestCase
         $this->assertSame(JobState::COMPLETED, $job->getState());
         $this->assertFalse($pool->hasDeadWorkers());
         $this->assertSame(1, $pool->count());
+    }
+
+    public function testQueueSurvivesRestartEndToEnd(): void
+    {
+        $path = sys_get_temp_dir() . '/php-job-queue-restart-' . uniqid('', true) . '.log';
+
+        try {
+            $clock = new FakeClock(1000.0);
+            $storage = new FileStorage($path);
+            $queue = new InMemoryQueue($clock, $storage);
+            $queue->push(Job::create(type: 'a'));
+
+            // No worker available, so the job stays queued in READY state
+            $pool = new WorkerPool(1, static function (Job $job): void {});
+            $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, storage: $storage);
+            $dispatcher->dispatchNext();
+
+            // Simulate process restart: rebuild the queue from storage
+            $restoredQueue = InMemoryQueue::restoreFromStorage($storage, new FakeClock(2000.0));
+
+            $this->assertSame(1, $restoredQueue->size());
+            $restored = $restoredQueue->pop();
+            $this->assertNotNull($restored);
+            $this->assertSame('a', $restored->getType());
+            $this->assertSame(JobState::READY, $restored->getState());
+        } finally {
+            if (file_exists($path)) {
+                unlink($path);
+            }
+        }
+    }
+
+    public function testCompletedJobIsNotRestoredAfterRestart(): void
+    {
+        $path = sys_get_temp_dir() . '/php-job-queue-restart-' . uniqid('', true) . '.log';
+
+        try {
+            $clock = new FakeClock(1000.0);
+            $storage = new FileStorage($path);
+            $queue = new InMemoryQueue($clock, $storage);
+            $job = Job::create(type: 'done');
+            $queue->push($job);
+
+            $pool = new WorkerPool(1, static function (Job $job): void {});
+            $pool->start();
+            $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, storage: $storage);
+            $dispatcher->drain();
+
+            $restoredQueue = InMemoryQueue::restoreFromStorage($storage, new FakeClock(2000.0));
+
+            $this->assertSame(0, $restoredQueue->size());
+        } finally {
+            if (file_exists($path)) {
+                unlink($path);
+            }
+        }
     }
 }

@@ -6,6 +6,7 @@ namespace App\Queue;
 
 use App\Job\Job;
 use App\Job\JobState;
+use App\Persistence\JobStorage;
 use App\Support\Clock;
 use App\Support\SystemClock;
 
@@ -19,7 +20,7 @@ final class InMemoryQueue implements Queue
     /** @var list<Job> */
     private array $delayed = [];
 
-    public function __construct(?Clock $clock = null)
+    public function __construct(?Clock $clock = null, private ?JobStorage $storage = null)
     {
         $this->clock = $clock ?? new SystemClock();
     }
@@ -39,6 +40,7 @@ final class InMemoryQueue implements Queue
         if ($job->getState() === JobState::DELAYED) {
             $this->delayed[] = $job;
             $this->sortDelayed();
+            $this->persist($job);
             return;
         }
 
@@ -46,10 +48,12 @@ final class InMemoryQueue implements Queue
         if ($availableAt !== null && $availableAt > $this->clock->now()) {
             $this->delayed[] = $job;
             $this->sortDelayed();
+            $this->persist($job);
             return;
         }
 
         $this->ready[] = $job;
+        $this->persist($job);
     }
 
     public function pop(?float $now = null): ?Job
@@ -69,6 +73,33 @@ final class InMemoryQueue implements Queue
     public function delayedSize(): int
     {
         return count($this->delayed);
+    }
+
+    public static function restoreFromStorage(JobStorage $storage, ?Clock $clock = null): self
+    {
+        $queue = new self($clock, $storage);
+
+        foreach ($storage->load() as $data) {
+            $job = Job::fromArray($data);
+            $state = $job->getState();
+
+            if ($state === JobState::PROCESSING) {
+                $job->markRetry($queue->clock->now());
+                $queue->ready[] = $job;
+                continue;
+            }
+
+            if ($state === JobState::READY || $state === JobState::DELAYED) {
+                $queue->push($job);
+            }
+        }
+
+        return $queue;
+    }
+
+    private function persist(Job $job): void
+    {
+        $this->storage?->store($job->getId()->toString(), $job->toArray());
     }
 
     private function sortDelayed(): void

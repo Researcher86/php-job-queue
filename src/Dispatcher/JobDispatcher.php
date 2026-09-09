@@ -12,6 +12,7 @@ use App\Support\SystemClock;
 use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use App\DLQ\DeadLetterQueue;
+use App\Persistence\JobStorage;
 use Throwable;
 
 final readonly class JobDispatcher
@@ -25,6 +26,7 @@ final readonly class JobDispatcher
         private Clock $clock = new SystemClock(),
         ?int $visibilityTimeout = null,
         private ?DeadLetterQueue $dlq = null,
+        private ?JobStorage $storage = null,
     ) {
         $this->monitor = new VisibilityMonitor($visibilityTimeout ?? 0, $clock);
     }
@@ -50,6 +52,7 @@ final readonly class JobDispatcher
 
         if ($result->isSuccess()) {
             $job->markCompleted();
+            $this->persist($job);
         } else {
             $this->handleFailure($job, $result->getException());
         }
@@ -89,12 +92,19 @@ final readonly class JobDispatcher
             $delay = $this->retryPolicy?->nextDelay($job) ?? 0;
             $job->markRetry($this->clock->now() + $delay);
             $this->queue->push($job);
+            $this->persist($job);
             return;
         }
 
         $job->markFailed();
+        $this->persist($job);
         if ($this->dlq !== null && $exception !== null) {
             $this->dlq->add($job, $exception);
         }
+    }
+
+    private function persist(Job $job): void
+    {
+        $this->storage?->store($job->getId()->toString(), $job->toArray());
     }
 }

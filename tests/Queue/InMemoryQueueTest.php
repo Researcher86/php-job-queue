@@ -7,6 +7,7 @@ namespace App\Tests\Queue;
 use App\Job\Job;
 use App\Job\JobState;
 use App\Queue\InMemoryQueue;
+use App\Persistence\InMemoryStorage;
 use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 
@@ -163,5 +164,65 @@ final class InMemoryQueueTest extends TestCase
 
         $this->clock->advance(60.0);
         $this->assertSame('delayed', $this->queue->pop()?->getType());
+    }
+
+    public function testReadyJobsSurviveRestart(): void
+    {
+        $storage = new InMemoryStorage();
+        $queue = new InMemoryQueue($this->clock, $storage);
+        $queue->push(Job::create(type: 'a'));
+        $queue->push(Job::create(type: 'b'));
+
+        $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(1000.0));
+
+        $this->assertSame(2, $restored->size());
+        $this->assertSame('a', $restored->pop()?->getType());
+        $this->assertSame('b', $restored->pop()?->getType());
+    }
+
+    public function testDelayedJobsSurviveRestart(): void
+    {
+        $storage = new InMemoryStorage();
+        $queue = new InMemoryQueue($this->clock, $storage);
+        $queue->push(Job::create(type: 'later'), delay: 60);
+
+        $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(1000.0));
+        $this->assertNull($restored->pop());
+
+        $clock = new FakeClock(1000.0);
+        $clock->advance(60.0);
+        $this->assertSame('later', $restored->pop($clock->now())?->getType());
+    }
+
+    public function testProcessingJobsReturnToReadyAfterRestart(): void
+    {
+        $storage = new InMemoryStorage();
+        $queue = new InMemoryQueue($this->clock, $storage);
+        $job = Job::create(type: 'a');
+        $queue->push($job);
+        $job->markProcessing();
+        $storage->store($job->getId()->toString(), $job->toArray());
+
+        $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(1000.0));
+
+        $this->assertSame(1, $restored->size());
+        $popped = $restored->pop();
+        $this->assertNotNull($popped);
+        $this->assertSame(JobState::READY, $popped->getState());
+    }
+
+    public function testCompletedJobsAreNotRestored(): void
+    {
+        $storage = new InMemoryStorage();
+        $queue = new InMemoryQueue($this->clock, $storage);
+        $job = Job::create(type: 'done');
+        $queue->push($job);
+        $job->markProcessing();
+        $job->markCompleted();
+        $storage->store($job->getId()->toString(), $job->toArray());
+
+        $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(1000.0));
+
+        $this->assertSame(0, $restored->size());
     }
 }
