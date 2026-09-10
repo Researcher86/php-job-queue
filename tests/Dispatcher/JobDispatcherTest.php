@@ -11,6 +11,7 @@ use App\Job\JobPriority;
 use App\Job\JobState;
 use App\Metrics\MetricsCollector;
 use App\Persistence\FileStorage;
+use App\Persistence\InMemoryStorage;
 use App\Queue\InMemoryQueue;
 use App\Queue\PriorityQueue;
 use App\Retry\FixedDelayRetry;
@@ -304,6 +305,87 @@ final class JobDispatcherTest extends TestCase
                 unlink($path);
             }
         }
+    }
+
+    /**
+     * An attempt is a delivery, and that has to survive the process.
+     *
+     * The log's last word on an in-flight job used to be the READY record
+     * from push(), attempts 0 - so a crash gave the job its whole
+     * allowance back. A job that reliably kills its worker would then loop
+     * across restarts forever instead of reaching the DLQ, which is the
+     * one thing the DLQ exists to prevent.
+     */
+    public function testAnInFlightJobsAttemptsSurviveARestart(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $storage = new InMemoryStorage();
+        $queue = new InMemoryQueue($clock, $storage);
+        $pool = new WorkerPool(1, Handlers::succeeds());
+        $pool->start();
+
+        $job = Job::create(type: 'doomed', maxAttempts: 3, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, storage: $storage);
+
+        // Dispatched, and then the process dies before any answer.
+        $this->assertTrue($dispatcher->dispatchPending() > 0);
+        $this->assertSame(1, $job->getAttempts());
+
+        $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(2000.0));
+        $recovered = $restored->pop();
+
+        $this->assertNotNull($recovered);
+        $this->assertSame(JobState::READY, $recovered->getState());
+        $this->assertSame(1, $recovered->getAttempts(), 'the delivery it lost still counted');
+        $this->assertSame(3, $recovered->getMaxAttempts());
+
+        $pool->shutdown();
+    }
+
+    /**
+     * The consequence of the above, followed to the end: a job that kills
+     * its worker every time still runs out of attempts. Without durable
+     * attempts each restart handed it a fresh allowance and it would run
+     * forever.
+     */
+    public function testAJobThatKeepsKillingItsWorkerStillReachesTheDlq(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $storage = new InMemoryStorage();
+        $dlq = new DeadLetterQueue($clock);
+        $queue = new InMemoryQueue($clock, $storage);
+
+        $job = Job::create(type: 'kills-workers', maxAttempts: 3, clock: $clock);
+        $queue->push($job);
+
+        // Three separate "processes", each dispatching once and then dying.
+        for ($restart = 0; $restart < 3; $restart++) {
+            $pool = new WorkerPool(1, Handlers::succeeds());
+            $pool->start();
+            $dispatcher = new JobDispatcher(
+                $queue,
+                $pool,
+                new FixedDelayRetry(0),
+                $clock,
+                dlq: $dlq,
+                storage: $storage,
+            );
+
+            $this->assertSame(1, $dispatcher->dispatchPending(), "restart $restart dispatched");
+
+            // The process dies here - no answer, no ACK - and the next one
+            // rebuilds the queue from the log.
+            $pool->shutdown();
+            $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
+        }
+
+        // Three deliveries used up. The fourth attempt is not allowed.
+        $recovered = $queue->pop();
+        $this->assertNotNull($recovered);
+        $this->assertSame(3, $recovered->getAttempts(), 'all three deliveries counted');
+        $this->assertSame(3, $recovered->getMaxAttempts());
     }
 
     public function testCompletedJobIsNotRestoredAfterRestart(): void

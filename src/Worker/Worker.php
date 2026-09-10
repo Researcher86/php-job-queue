@@ -488,9 +488,14 @@ final class Worker
      * What is left after that is a process inside a handler that outlasted
      * the grace period, and it gets SIGKILL rather than SIGTERM: it has no
      * handler installed for a signal (see spawn(), which resets them in
-     * the child) and nothing to save. Its job was never acknowledged, so
-     * the visibility timeout brings it back - which is exactly why killing
-     * it is safe.
+     * the child) and nothing to save.
+     *
+     * Its job is never acknowledged and keeps its lease, so it is
+     * recoverable - but by the PERSISTENCE LOG on the next start, not by
+     * the visibility timeout: the runtime that would have expired the
+     * lease is the one shutting down. Killing the worker is safe to the
+     * extent that storage is attached, and JobDispatcher::shutdown() says
+     * the same thing from the other end.
      *
      * Then waitpid, blocking: after SIGKILL the process is already gone or
      * about to be, and leaving it unreaped would leave a zombie.

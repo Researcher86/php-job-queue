@@ -218,6 +218,9 @@ QueueRuntime::tick()
    │           │     └─ Delivery: generation 1 (= attempts), worker id,
    │           │        dispatchedAt, deadline = now + timeout
    │           ├─ metrics: queue_wait   now - availableAt
+   │           ├─ JobStorage::store()    PROCESSING, attempts 1 - written
+   │           │                         before the job leaves the process,
+   │           │                         which is what makes attempts durable
    │           └─ Worker::assign($delivery)
    │                 └─ only the JOB crosses the wire; the worker keeps
    │                    the lease, so its answer is attributable
@@ -377,7 +380,7 @@ kill -9 <runtime pid>
         └─ InMemoryQueue::restoreFromStorage()
              ├─ replay the log, last write per job id wins
              ├─ tolerate a torn final line (that write was the crash)
-             ├─ PROCESSING  →  markRetry(now)  →  READY
+             ├─ PROCESSING  →  markRetry(now)  →  READY, attempts intact
              ├─ READY / DELAYED  →  as they were
              └─ COMPLETED / FAILED  →  not restored
 ```

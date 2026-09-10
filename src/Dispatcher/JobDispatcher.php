@@ -300,11 +300,19 @@ final class JobDispatcher
      *
      * $grace bounds the third step, in seconds; null waits as long as it
      * takes. When it runs out, WorkerPool::shutdown() kills whatever is
-     * left, and the jobs those workers were holding stay PROCESSING: they
-     * were never acknowledged, so they come back through the visibility
-     * timeout (or, across a restart, through the persistence log). Losing
-     * the process must not mean losing the job - that is the invariant, and
-     * a bounded shutdown is only safe because of it.
+     * left, and the jobs those workers were holding stay PROCESSING with
+     * their leases unreleased.
+     *
+     * What recovers them is the persistence log on the next start, NOT the
+     * visibility timeout - the runtime that would have expired those
+     * leases is the one shutting down, so there is no later tick to expire
+     * them on. The timeout covers the other case: a worker that dies while
+     * the runtime keeps running.
+     *
+     * So a bounded shutdown is only as safe as the storage behind it. With
+     * no JobStorage attached, a job killed by the grace period is lost
+     * exactly like any other in-flight job when the process ends - which
+     * is a property of the configuration, not of the shutdown.
      *
      * The grace period is measured against the wall clock rather than the
      * injected Clock, deliberately: it is how long a real forked process
@@ -343,10 +351,10 @@ final class JobDispatcher
      * Hands one job to one worker, and returns whether it got there.
      *
      * The order matters and is the invariant of PLAN.md Phase 5: the job is
-     * marked PROCESSING and leased from the visibility monitor BEFORE it is
-     * written to the socket, so there is no instant at which the job is
-     * neither in the queue nor accounted for as in flight. A job must not
-     * be able to fall between the two.
+     * marked PROCESSING, leased from the visibility monitor, and written to
+     * storage BEFORE it goes to the socket - so there is no instant at
+     * which the job is neither in the queue nor accounted for as in flight,
+     * in memory or on disk. A job must not be able to fall between them.
      *
      * The lease - a Delivery - is what the worker holds and what its answer
      * will be attributed to. Issuing it here, after markProcessing(), is
@@ -370,6 +378,22 @@ final class JobDispatcher
 
         $job->markProcessing();
         $delivery = $this->monitor->track($job, $worker->getId());
+
+        // Written BEFORE the job leaves the process, so that a crash
+        // anywhere from here on is recoverable - and so that the attempt
+        // this delivery consumed is durable.
+        //
+        // Without this write the log's last word on an in-flight job is
+        // the READY record from push(), attempts 0. A crashed job would
+        // come back with its whole allowance again, and one that reliably
+        // kills its worker would loop across restarts forever instead of
+        // reaching the DLQ. It also made InMemoryQueue's PROCESSING
+        // restore branch unreachable from anything the system itself
+        // wrote.
+        //
+        // The cost is one more append per dispatch. That is what durable
+        // attempt counting costs in a log-only design.
+        $this->persist($job);
 
         if ($availableAt !== null) {
             $this->metrics?->recordLatency(

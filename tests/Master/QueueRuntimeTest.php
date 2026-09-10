@@ -8,6 +8,7 @@ use App\Dispatcher\JobDispatcher;
 use App\Job\Job;
 use App\Job\JobState;
 use App\Master\QueueRuntime;
+use App\Persistence\FileStorage;
 use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
 use App\Tests\Support\Handlers;
@@ -130,15 +131,19 @@ final class QueueRuntimeTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 15's last step: the grace period runs out, the worker
-     * is killed mid-job, and the job is NOT lost - it was never
-     * acknowledged, so the visibility timeout brings it back.
+     * PLAN.md Phase 15's last step: the grace period runs out and the
+     * worker is killed mid-job. What this proves is that the job is left
+     * RECOVERABLE - still PROCESSING, and still holding its lease, so
+     * nothing has decided its fate.
      *
-     * This is the trade the bounded shutdown depends on. Without the
-     * visibility timeout, killing the worker here would lose the job
-     * outright.
+     * Note what it does NOT prove. The requeueExpired() call at the end is
+     * this test reaching into a dispatcher that is still in memory because
+     * the test is holding it. A real process is gone by now, and with it
+     * the monitor - so the visibility timeout is not what recovers a job
+     * killed by a shutdown. The persistence log is, on the next start:
+     * see testAGracePeriodKilledJobIsRestoredFromTheLog().
      */
-    public function testAJobKilledByTheGracePeriodComesBackThroughTheTimeout(): void
+    public function testAJobKilledByTheGracePeriodKeepsItsLease(): void
     {
         $job = Job::create(type: 'never-finishes', clock: $this->clock);
         $this->queue->push($job);
@@ -157,13 +162,72 @@ final class QueueRuntimeTest extends TestCase
         $this->assertSame(JobState::PROCESSING, $job->getState(), 'never acknowledged');
         $this->assertTrue($dispatcher->isProcessing($job));
 
-        // The deadline passes, and the job the killed worker was holding
-        // becomes available again.
+        // With the dispatcher still in memory, the lease is intact and the
+        // deadline can still reclaim it. See the docblock for why that is
+        // not the same as a real process recovering.
         $this->clock->advance(31.0);
 
         $this->assertSame(1, $dispatcher->requeueExpired());
         $this->assertSame(JobState::READY, $job->getState());
         $this->assertSame(1, $this->queue->readySize());
+    }
+
+    /**
+     * The recovery path a real deployment actually takes for a job killed
+     * by the shutdown grace period: the log, on the next start.
+     *
+     * The runtime that would have expired the lease is the one shutting
+     * down, so nothing in this process will ever reclaim the job. What
+     * survives is the last thing written about it - PROCESSING - and
+     * restoreFromStorage() turns that back into READY.
+     *
+     * Which also states the limit: with no storage attached, this job is
+     * lost. That is a property of the configuration, not of the shutdown.
+     */
+    public function testAGracePeriodKilledJobIsRestoredFromTheLog(): void
+    {
+        $log = sys_get_temp_dir() . '/php-job-queue-shutdown-' . uniqid('', true) . '.log';
+
+        try {
+            $storage = new FileStorage($log);
+            $queue = new InMemoryQueue($this->clock, $storage);
+            $job = Job::create(type: 'never-finishes', clock: $this->clock);
+            $queue->push($job);
+
+            $dispatcher = new JobDispatcher(
+                $queue,
+                new WorkerPool(1, static function (Job $j): void {
+                    posix_kill(posix_getppid(), SIGTERM);
+                    sleep(30);
+                }),
+                clock: $this->clock,
+                visibilityTimeout: 30,
+                storage: $storage,
+            );
+
+            (new QueueRuntime($dispatcher, $this->clock, maxWait: 0.01, shutdownGrace: 0.2))->run();
+
+            // The process is done. In memory the job is PROCESSING and
+            // nothing is left running that could expire its lease.
+            $this->assertSame(JobState::PROCESSING, $job->getState());
+
+            // A new process, reading the same log.
+            $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(2000.0));
+
+            $this->assertSame(1, $restored->readySize(), 'the job came back');
+
+            $recovered = $restored->pop();
+            $this->assertNotNull($recovered);
+            $this->assertSame('never-finishes', $recovered->getType());
+            $this->assertSame(JobState::READY, $recovered->getState(), 'available again');
+            // The delivery that was killed still counted - an attempt is a
+            // delivery, so the next one is attempt 2 of 3.
+            $this->assertSame(1, $recovered->getAttempts());
+        } finally {
+            if (file_exists($log)) {
+                unlink($log);
+            }
+        }
     }
 
     public function testShutdownStopsAcceptingNewWork(): void

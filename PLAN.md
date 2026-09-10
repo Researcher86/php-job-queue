@@ -1,6 +1,6 @@
 # PHP Job Queue — the plan it was built from
 
-> **Status: all 16 phases are done.** 210 tests, PHPStan level 8 clean.
+> **Status: all 16 phases are done.** 230 tests, PHPStan level 8 clean.
 >
 > This file is kept as the record of what was built, in what order, and what
 > each step was for - not as work outstanding. Every `[x]` names a test that
@@ -1436,6 +1436,8 @@ This is an excellent educational exercise.
 * [x] Delayed jobs restored
 * [x] Processing jobs handled correctly after restart
 * [x] Completed jobs are not restored - a finished job is not work
+* [x] An in-flight job's attempts survive a restart
+* [x] A job that keeps killing its worker still runs out of attempts
 * [x] An idempotency key survives a restart, so a redelivered job's side
       effect still happens only once
 
@@ -1727,9 +1729,13 @@ The grace period bounds the third step. When it runs out, the remaining
 workers are killed - `Worker::shutdown()` closes the socket first, which is
 how a worker between jobs exits by itself, and reaches for SIGKILL only for
 one still inside a handler. The jobs those workers were holding stay
-PROCESSING: never acknowledged, so they come back through the visibility
-timeout, or across a restart through the persistence log. A bounded
-shutdown is only safe because of that.
+PROCESSING: never acknowledged, and never released from their lease. But
+the visibility timeout is not what brings them back - the runtime is on
+its way out, so there is no later tick to expire anything on. What carries
+them across is the persistence log, restored on the next start. A bounded
+shutdown is only as safe as the storage behind it; with none attached, a
+job killed by the grace period is lost like any other in-flight job when
+the process ends.
 
 Workers reset their inherited signal handlers on fork. Without it, a
 SIGTERM to the process group would run a runtime shutdown inside every
@@ -1741,7 +1747,9 @@ worker.
 * [x] A delayed job is picked up once it comes due
 * [x] A real SIGTERM lets an in-flight job finish
 * [x] The grace period bounds the shutdown
-* [x] A job killed by the grace period returns through the visibility timeout
+* [x] A job killed by the grace period keeps its lease, unreleased
+* [x] A job killed by the grace period is restored to READY on the next
+      start, from the log
 * [x] Shutdown stops accepting new work
 * [x] A stop requested before `run()` is not lost
 

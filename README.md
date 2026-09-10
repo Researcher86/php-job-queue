@@ -8,7 +8,7 @@ This repository answers one question by building the answer:
 
 It is not a replacement for RabbitMQ, Redis, Kafka, Symfony Messenger,
 Laravel Queue or Sidekiq. It is the mechanism those things contain, with
-nothing else in the way: 37 classes, no dependencies beyond a UUID library,
+nothing else in the way: 38 classes, no dependencies beyond a UUID library,
 and every reliability feature written out where you can put a breakpoint in
 it.
 
@@ -22,7 +22,7 @@ Read  →  Run  →  Experiment  →  Break something  →  Observe  →  Unders
 
 ## Status
 
-All 16 phases of [PLAN.md](PLAN.md) are done, 210 tests, PHPStan level 8
+All 16 phases of [PLAN.md](PLAN.md) are done, 230 tests, PHPStan level 8
 clean.
 
 `Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
@@ -34,7 +34,7 @@ scheduling` · `Metrics` · `Graceful shutdown` · `Stress and chaos tests`
 ```bash
 make build              # docker image
 make docker-install     # composer install
-make docker-test        # 210 tests
+make docker-test        # the whole suite
 make docker-analyse     # phpstan, level 8
 make docker-lint        # php-cs-fixer, check only
 
@@ -624,11 +624,20 @@ On restore:
 | last known state | what happens |
 |---|---|
 | READY, DELAYED | restored as it was |
-| PROCESSING | back to READY — nobody is left to ACK it, so it runs again |
+| PROCESSING | back to READY — nobody is left to ACK it, so it runs again, **with its attempt count intact** |
 | COMPLETED, FAILED | not restored; a finished job is not work |
 
 The PROCESSING row is the at-least-once bargain restated at the persistence
-layer. The cost is bounded replay: the log grows with every state change and
+layer, and it only works because the dispatcher writes the record when the
+job goes out, not only when it comes back. That write is what makes
+`attempts` durable — without it the log's last word on an in-flight job is
+the READY record from `push()`, so a crash hands the job its whole
+allowance again and a job that reliably kills its worker loops across
+restarts forever instead of reaching the DLQ. The price is one more append
+per dispatch, which is what durable attempt counting costs in a log-only
+design.
+
+The other cost is bounded replay: the log grows with every state change and
 `load()` replays all of it. A real system pairs this with periodic
 snapshots; this one does not, and says so.
 
@@ -734,11 +743,24 @@ workers are killed — [`Worker::shutdown()`](src/Worker/Worker.php) closes
 the socket first, which is how a worker between jobs exits by itself, and
 reaches for SIGKILL only for one still inside a handler.
 
-The jobs those killed workers were holding stay PROCESSING: never
-acknowledged, so they come back through the visibility timeout, or across a
-restart through the persistence log. **A bounded shutdown is only safe
-because of that**, and there is a test that kills a worker mid-job and
-follows the job all the way back to READY.
+The jobs those killed workers were holding stay PROCESSING — never
+acknowledged, and never released from their lease. What brings them back is
+worth being exact about, because the two recovery paths are not
+interchangeable:
+
+| the worker dies… | reclaimed by | when |
+|---|---|---|
+| while the runtime keeps running | the visibility timeout | the next tick after the deadline passes |
+| killed by the shutdown grace period | the persistence log | the next start, as a PROCESSING record restored to READY |
+
+The visibility timeout cannot save the second case: the runtime is on its
+way out, so there is no later tick to expire anything on. **A bounded
+shutdown is only as safe as the storage behind it** — with no
+[`JobStorage`](src/Persistence/JobStorage.php) attached, a job killed by the
+grace period is lost, exactly like any other in-flight job when the process
+ends. Two tests cover the pair: one that the lease survives the shutdown
+unreleased, and one that follows a grace-period-killed job through a real
+restart back to READY.
 
 SIGTERM and SIGINT only set a flag. Nothing is shut down from inside a
 signal handler, because that is the only way the order of the steps stays
@@ -889,8 +911,10 @@ docker compose exec php pkill -TERM -f bin/worker.php
 ```
 
 The 15-second job finishes, its result is applied, and only then does the
-process exit. Now do it with `-KILL` instead and nothing is applied — the
-job comes back through the visibility timeout on the next run.
+process exit. Now do it with `-KILL` instead and nothing is applied — and
+since `bin/worker.php` runs without storage, that job is simply gone. Give
+the dispatcher a `FileStorage` and try again to see it restored on the next
+run.
 
 **Make the visibility timeout too short.** Set it below your handler's
 runtime and watch the same job run in two workers at once, with nothing

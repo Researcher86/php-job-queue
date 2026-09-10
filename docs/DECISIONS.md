@@ -238,6 +238,31 @@ than one defensible answer.
 
 ---
 
+## 12a. The dispatch is written before the job leaves the process
+
+**Chosen:** `dispatch()` appends a PROCESSING record after marking the job
+and taking its lease, before writing to the worker's socket.
+
+**Why:** without it the log's last word on an in-flight job is the READY
+record from `push()`, with attempts 0. Two things follow, and both are
+worse than the extra write.
+
+The attempt count is not durable, so a crash hands the job its whole
+allowance again - and a job that reliably kills its worker (an OOM payload,
+a segfaulting extension) loops across restarts forever instead of reaching
+the DLQ, which is the one thing the DLQ exists to prevent.
+
+And the PROCESSING branch of `restoreFromStorage()` was unreachable from
+anything the system itself wrote. It was covered only by a test that
+appended the record by hand, which is how it went unnoticed: the branch
+worked, nothing ever took it.
+
+**Cost:** one more append per dispatch, doubling the write volume for a
+job that succeeds first time. That is what durable attempt counting costs
+in a log-only design, and it is stated in the README rather than hidden.
+
+---
+
 ## 12. Append-only log, and a torn final record is tolerated
 
 **Chosen:** one JSON object per line, appended, keyed by job id, last write
