@@ -126,6 +126,20 @@ final class PriorityQueueTest extends TestCase
         $this->assertSame(JobState::DELAYED, $job->getState());
     }
 
+    public function testDelayedJobsAreCountedSeparatelyFromReadyOnes(): void
+    {
+        $this->queue->push(Job::create(type: 'now', priority: JobPriority::HIGH));
+        $this->queue->push(Job::create(type: 'later', priority: JobPriority::LOW), delay: 60);
+
+        $this->assertSame(2, $this->queue->size());
+        $this->assertSame(1, $this->queue->delayedSize());
+
+        $this->clock->advance(60.0);
+        $this->queue->pop();
+
+        $this->assertSame(0, $this->queue->delayedSize());
+    }
+
     public function testDelayedJobBecomesReadyWhenPromoted(): void
     {
         $job = Job::create(type: 'a', priority: JobPriority::LOW);

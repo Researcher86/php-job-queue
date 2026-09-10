@@ -108,6 +108,16 @@ final class InMemoryQueueTest extends TestCase
         $this->assertSame(JobState::READY, $job->getState());
     }
 
+    public function testReadyAndDelayedJobsAreCountedSeparately(): void
+    {
+        $this->queue->push(Job::create(type: 'now', clock: $this->clock));
+        $this->queue->push(Job::create(type: 'later', clock: $this->clock), delay: 60);
+
+        $this->assertSame(2, $this->queue->size());
+        $this->assertSame(1, $this->queue->readySize());
+        $this->assertSame(1, $this->queue->delayedSize());
+    }
+
     public function testDelayedJobIsNotImmediatelyAvailable(): void
     {
         $job = Job::create(type: 'a');

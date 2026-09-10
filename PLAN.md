@@ -991,11 +991,25 @@ Min heap
 Sorted timestamps
 ```
 
+Implemented as `Scheduler/DelayedJobScheduler`, a min-heap (`SplHeap`
+ordered by `availableAt`, insertion order as the tie-break) shared by
+`InMemoryQueue` and `PriorityQueue`. It replaced an array re-sorted on
+every push - O(log n) to insert instead of O(n log n), and, the part the
+runtime loop needs, `nextDeadline()` in O(1) off the root, so nothing ever
+scans the whole set.
+
+A retry under a backoff policy is a READY job with a future `availableAt`,
+and goes through the same scheduler. Backoff is not a second waiting
+mechanism; it is this one, reused.
+
 ### Tests
 
 * [x] Delayed job is not immediately available
 * [x] Job becomes available at correct time
 * [x] Multiple delayed jobs preserve schedule
+* [x] Equal deadlines preserve insertion order
+* [x] Next deadline is answered without scanning
+* [x] Ready and delayed jobs are counted separately
 
 ---
 
