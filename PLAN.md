@@ -444,9 +444,9 @@ Create a minimal development environment.
 * [x] Configure PSR-4 autoloading
 * [x] Add PHPUnit
 * [x] Add PHPStan
-* [ ] Add PHP CS Fixer or another formatter
+* [x] Add PHP CS Fixer or another formatter
 * [x] Create `Makefile`
-* [ ] Create initial README
+* [x] Create initial README
 * [x] Create PLAN.md
 
 ### Initial commands
@@ -454,6 +454,8 @@ Create a minimal development environment.
 ```bash
 make test
 make analyse
+make lint
+make fix
 make run
 ```
 

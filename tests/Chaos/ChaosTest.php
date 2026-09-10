@@ -7,13 +7,14 @@ namespace App\Tests\Chaos;
 use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
-use App\Queue\InMemoryQueue;
 use App\Persistence\InMemoryStorage;
+use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
 use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class ChaosTest extends TestCase
 {
@@ -22,7 +23,7 @@ final class ChaosTest extends TestCase
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(2, static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         });
         $pool->start();
         $dlq = new DeadLetterQueue($clock);
@@ -124,7 +125,7 @@ final class ChaosTest extends TestCase
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(1, static function (Job $job): never {
-            throw new \RuntimeException('Should not execute delayed job early');
+            throw new RuntimeException('Should not execute delayed job early');
         });
         $pool->start();
 
@@ -304,7 +305,7 @@ final class ChaosTest extends TestCase
         $dlq = new DeadLetterQueue($clock);
 
         $pool = new WorkerPool(1, static function (Job $job): never {
-            throw new \RuntimeException('fail');
+            throw new RuntimeException('fail');
         });
         $pool->start();
 

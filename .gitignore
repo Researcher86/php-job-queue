@@ -12,6 +12,10 @@
 /.phpstan/
 /phpstan-baseline.neon
 
+# PHP CS Fixer
+/.php-cs-fixer.php
+/.php-cs-fixer.cache
+
 # IDE
 /.idea/
 /.vscode/

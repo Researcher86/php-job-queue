@@ -11,6 +11,7 @@ use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
 use App\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class StressTest extends TestCase
 {
@@ -63,7 +64,7 @@ final class StressTest extends TestCase
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(8, static function (Job $job): void {
             if ($job->getType() === 'fail') {
-                throw new \RuntimeException('boom');
+                throw new RuntimeException('boom');
             }
         });
         $pool->start();

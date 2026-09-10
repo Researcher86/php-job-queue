@@ -19,6 +19,7 @@ use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use Closure;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class JobDispatcherTest extends TestCase
 {
@@ -51,7 +52,7 @@ final class JobDispatcherTest extends TestCase
     public function testFailedJobIsFailedAfterExhaustingAttempts(): void
     {
         [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         });
 
         $job = Job::create(type: 'bad', maxAttempts: 1);
@@ -65,7 +66,7 @@ final class JobDispatcherTest extends TestCase
     public function testFailedJobIsRetriedWhenAttemptsRemain(): void
     {
         [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         }, new FixedDelayRetry(0));
 
         $job = Job::create(type: 'bad', maxAttempts: 2);
@@ -80,7 +81,7 @@ final class JobDispatcherTest extends TestCase
     public function testRetriedJobIsDispatchedAgainUntilFailed(): void
     {
         [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         }, new FixedDelayRetry(0));
 
         $job = Job::create(type: 'bad', maxAttempts: 2);
@@ -99,7 +100,7 @@ final class JobDispatcherTest extends TestCase
         [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job) use (&$attempts): void {
             $attempts++;
             if ($attempts === 1) {
-                throw new \RuntimeException('boom');
+                throw new RuntimeException('boom');
             }
         }, new FixedDelayRetry(0));
 
@@ -251,7 +252,7 @@ final class JobDispatcherTest extends TestCase
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(1, static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         });
         $pool->start();
         $dlq = new DeadLetterQueue($clock);
@@ -369,7 +370,7 @@ final class JobDispatcherTest extends TestCase
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
         $pool = new WorkerPool(1, static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         });
         $pool->start();
         $dlq = new DeadLetterQueue($clock);

@@ -6,8 +6,8 @@ namespace App\Tests\Queue;
 
 use App\Job\Job;
 use App\Job\JobState;
-use App\Queue\InMemoryQueue;
 use App\Persistence\InMemoryStorage;
+use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 

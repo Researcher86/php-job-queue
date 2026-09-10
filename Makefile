@@ -1,4 +1,6 @@
-.PHONY: install test analyse run up down build shell
+.PHONY: install test analyse lint fix run up down build shell \
+        docker-install docker-test docker-analyse docker-lint docker-fix \
+        docker-run docker-run-debug
 
 install:
 	composer install
@@ -8,6 +10,13 @@ test:
 
 analyse:
 	vendor/bin/phpstan analyse
+
+# check reports without touching anything (what CI runs); fix rewrites.
+lint:
+	vendor/bin/php-cs-fixer check --diff
+
+fix:
+	vendor/bin/php-cs-fixer fix
 
 run:
 	php bin/run.php
@@ -32,6 +41,12 @@ docker-test: up
 
 docker-analyse: up
 	docker compose exec php composer analyse
+
+docker-lint: up
+	docker compose exec php composer lint
+
+docker-fix: up
+	docker compose exec php composer fix
 
 docker-run: up
 	docker compose exec php php bin/run.php

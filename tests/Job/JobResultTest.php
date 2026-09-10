@@ -6,6 +6,7 @@ namespace App\Tests\Job;
 
 use App\Job\JobResult;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class JobResultTest extends TestCase
 {
@@ -19,7 +20,7 @@ final class JobResultTest extends TestCase
 
     public function testFailureResult(): void
     {
-        $exception = new \RuntimeException('boom');
+        $exception = new RuntimeException('boom');
         $result = JobResult::failure($exception);
 
         $this->assertFalse($result->isSuccess());

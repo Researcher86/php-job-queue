@@ -9,6 +9,7 @@ use App\Job\Job;
 use App\Job\JobState;
 use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class DeadLetterQueueTest extends TestCase
 {
@@ -23,7 +24,7 @@ final class DeadLetterQueueTest extends TestCase
     {
         $dlq = new DeadLetterQueue($this->clock);
         $job = $this->failedJob(attempts: 3);
-        $exception = new \RuntimeException('boom');
+        $exception = new RuntimeException('boom');
 
         $dlq->add($job, $exception);
 
@@ -35,7 +36,7 @@ final class DeadLetterQueueTest extends TestCase
     {
         $dlq = new DeadLetterQueue($this->clock);
         $job = $this->failedJob(attempts: 3);
-        $exception = new \RuntimeException('boom');
+        $exception = new RuntimeException('boom');
 
         $dlq->add($job, $exception);
         $record = $dlq->find($job->getId()->toString());
@@ -50,8 +51,8 @@ final class DeadLetterQueueTest extends TestCase
     public function testListReturnsAllRecords(): void
     {
         $dlq = new DeadLetterQueue($this->clock);
-        $dlq->add($this->failedJob(attempts: 1), new \RuntimeException('a'));
-        $dlq->add($this->failedJob(attempts: 2), new \RuntimeException('b'));
+        $dlq->add($this->failedJob(attempts: 1), new RuntimeException('a'));
+        $dlq->add($this->failedJob(attempts: 2), new RuntimeException('b'));
 
         $this->assertCount(2, $dlq->all());
     }
@@ -60,7 +61,7 @@ final class DeadLetterQueueTest extends TestCase
     {
         $dlq = new DeadLetterQueue($this->clock);
         $job = $this->failedJob(attempts: 1);
-        $dlq->add($job, new \RuntimeException('a'));
+        $dlq->add($job, new RuntimeException('a'));
 
         $dlq->delete($job->getId()->toString());
 
@@ -72,7 +73,7 @@ final class DeadLetterQueueTest extends TestCase
     {
         $dlq = new DeadLetterQueue($this->clock);
         $job = $this->failedJob(attempts: 3);
-        $dlq->add($job, new \RuntimeException('boom'));
+        $dlq->add($job, new RuntimeException('boom'));
 
         $retried = $dlq->retry($job->getId()->toString());
 

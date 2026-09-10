@@ -9,6 +9,7 @@ use App\Worker\Worker;
 use App\Worker\WorkerState;
 use LogicException;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class WorkerTest extends TestCase
 {
@@ -44,7 +45,7 @@ final class WorkerTest extends TestCase
     public function testWorkerReturnsFailureResultWithException(): void
     {
         $worker = new Worker(1, static function (Job $job): void {
-            throw new \RuntimeException('boom');
+            throw new RuntimeException('boom');
         });
         $worker->spawn();
 
