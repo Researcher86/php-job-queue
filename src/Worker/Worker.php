@@ -13,6 +13,37 @@ use Throwable;
 
 final class Worker
 {
+    /**
+     * The whole state machine, stated once: event => (state it is legal
+     * from => state it leads to). Anything absent throws.
+     *
+     * Keyed by ->name because enum cases cannot be array keys.
+     *
+     *   FROM        start   assign   finish     drain      die
+     *   ───────────────────────────────────────────────────────
+     *   STARTING    IDLE    -        -          STOPPING   DEAD
+     *   IDLE        -       BUSY     -          STOPPING   DEAD
+     *   BUSY        -       -        IDLE       DRAINING   DEAD
+     *   DRAINING    -       -        STOPPING   DRAINING   DEAD
+     *   STOPPING    -       -        -          STOPPING   DEAD
+     *   DEAD        -       -        -          DEAD       DEAD
+     *
+     * The two entries that carry the design:
+     *
+     *  - BUSY + drain = DRAINING, not STOPPING. A drained worker that is
+     *    holding a job is left completely alone to finish it; only the
+     *    dispatch of NEW work stops. That is what makes a graceful
+     *    shutdown graceful.
+     *  - DRAINING + finish = STOPPING, not IDLE. A worker that answered its
+     *    last request must not become available again, or a shutdown could
+     *    hand it one more job on the way out.
+     *
+     * DRAINING and DEAD tolerate drain() as a no-op rather than an error:
+     * draining something already on its way out is a step backwards, not a
+     * bug.
+     *
+     * @var array<string, array<string, WorkerState>>
+     */
     private const array TRANSITIONS = [
         'start' => [
             'STARTING' => WorkerState::IDLE,
@@ -22,6 +53,15 @@ final class Worker
         ],
         'finish' => [
             'BUSY' => WorkerState::IDLE,
+            'DRAINING' => WorkerState::STOPPING,
+        ],
+        'drain' => [
+            'STARTING' => WorkerState::STOPPING,
+            'IDLE' => WorkerState::STOPPING,
+            'BUSY' => WorkerState::DRAINING,
+            'DRAINING' => WorkerState::DRAINING,
+            'STOPPING' => WorkerState::STOPPING,
+            'DEAD' => WorkerState::DEAD,
         ],
         'die' => [
             'STARTING' => WorkerState::DEAD,
@@ -29,6 +69,7 @@ final class Worker
             'BUSY' => WorkerState::DEAD,
             'DRAINING' => WorkerState::DEAD,
             'STOPPING' => WorkerState::DEAD,
+            'DEAD' => WorkerState::DEAD,
         ],
     ];
 
@@ -52,10 +93,6 @@ final class Worker
     private mixed $stream = null;
 
     private int $pid = 0;
-
-    private float $assignedAt = 0.0;
-
-    private bool $draining = false;
 
     public function __construct(
         private readonly int $id,
@@ -139,7 +176,6 @@ final class Worker
         }
 
         $this->currentJob = $job;
-        $this->assignedAt = microtime(true);
         $this->apply('assign');
     }
 
@@ -201,7 +237,9 @@ final class Worker
      */
     public function collect(?float $timeout = 0.0): ?WorkerOutcome
     {
-        if ($this->state !== WorkerState::BUSY || !is_resource($this->stream)) {
+        // isWorking() rather than a state check: a worker drained while
+        // holding a job is DRAINING, and its answer still has to be read.
+        if (!$this->isWorking() || !is_resource($this->stream)) {
             return null;
         }
 
@@ -214,41 +252,30 @@ final class Worker
         }
 
         $job = $this->currentJob;
-        $startedAt = $this->assignedAt;
         $this->currentJob = null;
-        $this->assignedAt = 0.0;
 
         if ($job === null) {
             throw new LogicException('Worker returned without an assigned job');
         }
 
-        $payload = self::readExact($this->stream, 4);
-        if ($payload === false) {
+        $frame = $this->readFrame();
+
+        // No frame means EOF: the process died holding this job. The null
+        // result is what tells the dispatcher the job was never
+        // acknowledged - see WorkerOutcome.
+        if ($frame === null) {
             $this->apply('die');
-            return new WorkerOutcome($job, null, $startedAt);
+
+            return new WorkerOutcome($job, null);
         }
 
-        $unpacked = unpack('N', $payload);
-        if ($unpacked === false) {
-            $this->apply('die');
-            return new WorkerOutcome($job, null, $startedAt);
-        }
+        $data = json_decode($frame, true, flags: JSON_THROW_ON_ERROR);
 
-        $body = self::readExact($this->stream, $unpacked[1]);
-        if ($body === false) {
-            $this->apply('die');
-            return new WorkerOutcome($job, null, $startedAt);
-        }
-
-        $data = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
-        $outcome = new WorkerOutcome($job, $this->decodeResult($data), $startedAt);
-
+        // BUSY -> IDLE, or DRAINING -> STOPPING for a worker that was
+        // retired while it finished this last job.
         $this->apply('finish');
-        if ($this->draining) {
-            $this->state = WorkerState::STOPPING;
-        }
 
-        return $outcome;
+        return new WorkerOutcome($job, $this->decodeResult($data));
     }
 
     public function getId(): int
@@ -281,9 +308,23 @@ final class Worker
         return $this->state === WorkerState::IDLE;
     }
 
+    /** Assigned a job right now. Not the same as isWorking() - see drain(). */
     public function isBusy(): bool
     {
         return $this->state === WorkerState::BUSY;
+    }
+
+    /**
+     * Holding a job right now, whatever the state says.
+     *
+     * The distinction that used to need a separate boolean: the STATE says
+     * whether new work may be dispatched here, and this says whether work
+     * is happening. A worker drained mid-job is DRAINING - not available,
+     * still working.
+     */
+    public function isWorking(): bool
+    {
+        return $this->currentJob !== null;
     }
 
     public function isDead(): bool
@@ -291,30 +332,31 @@ final class Worker
         return $this->state === WorkerState::DEAD;
     }
 
+    /** On its way out: retired mid-job, or already stopping. */
     public function isDraining(): bool
     {
-        return $this->draining
-            || $this->state === WorkerState::DRAINING
-            || $this->state === WorkerState::STOPPING;
+        return $this->state === WorkerState::DRAINING || $this->state === WorkerState::STOPPING;
     }
 
+    /**
+     * Takes the worker out of rotation - PLAN.md Phase 15.
+     *
+     * A worker holding a job becomes DRAINING and is left completely alone:
+     * it finishes, and its answer is applied exactly as it would have been.
+     * One with nothing to do has no reason to wait, so its socket is closed
+     * straight away, which is the EOF its process exits on.
+     *
+     * Idempotent, and a no-op for a worker already leaving or already dead.
+     */
     public function drain(): void
     {
-        if ($this->state === WorkerState::BUSY) {
-            $this->draining = true;
-            return;
-        }
+        $wasIdle = $this->state === WorkerState::IDLE || $this->state === WorkerState::STARTING;
 
-        if ($this->state === WorkerState::IDLE) {
+        $this->apply('drain');
+
+        if ($wasIdle) {
             $this->terminate();
-            $this->state = WorkerState::STOPPING;
-            return;
         }
-
-        throw new LogicException(sprintf(
-            'Cannot drain a worker in state %s',
-            $this->state->name,
-        ));
     }
 
     public function markDead(): void
@@ -322,6 +364,11 @@ final class Worker
         $this->apply('die');
     }
 
+    /**
+     * Closes our end of the socket and collects the process if it has
+     * already gone. The polite half of shutdown(): a worker waiting for its
+     * next job reads EOF and returns from its loop by itself.
+     */
     public function terminate(): void
     {
         if (is_resource($this->stream)) {
@@ -475,6 +522,31 @@ final class Worker
             ));
         }
         $this->state = $next;
+    }
+
+    /**
+     * One length-prefixed frame from the worker, or null on EOF.
+     *
+     * Null is not an error here - it is how a crash is detected. See
+     * writeAll() for the frame format.
+     */
+    private function readFrame(): ?string
+    {
+        $header = self::readExact($this->stream, 4);
+
+        if ($header === false) {
+            return null;
+        }
+
+        $unpacked = unpack('N', $header);
+
+        if ($unpacked === false) {
+            return null;
+        }
+
+        $body = self::readExact($this->stream, $unpacked[1]);
+
+        return $body === false ? null : $body;
     }
 
     /**

@@ -78,7 +78,7 @@ final class ChaosTest extends TestCase
         $this->assertNotNull($replacement);
         $replacement->assign(Job::create(type: 'after-crash'));
         $result = $pool->poll(null);
-        $this->assertTrue($result?->getOutcome()->getResult()?->isSuccess());
+        $this->assertTrue($result?->getResult()?->isSuccess());
 
         $pool->shutdown();
     }
@@ -130,7 +130,7 @@ final class ChaosTest extends TestCase
 
         $result = $pool->poll(null);
         $this->assertNotNull($result);
-        $this->assertNull($result->getOutcome()->getResult());
+        $this->assertNull($result->getResult());
 
         // The job is not lost: it can be recovered and processed again
         $pool->replaceDeadWorkers();
@@ -139,7 +139,7 @@ final class ChaosTest extends TestCase
         $recovered->assign($job);
         $retried = $pool->poll(null);
         $this->assertNotNull($retried);
-        $this->assertTrue($retried->getOutcome()->getResult()?->isSuccess());
+        $this->assertTrue($retried->getResult()?->isSuccess());
 
         $pool->shutdown();
     }
@@ -377,7 +377,7 @@ final class ChaosTest extends TestCase
         $worker->assign($job3);
         $result = $pool->poll(null);
         $this->assertNotNull($result);
-        $this->assertTrue($result->getOutcome()->getResult()?->isSuccess());
+        $this->assertTrue($result->getResult()?->isSuccess());
 
         $pool->shutdown();
     }

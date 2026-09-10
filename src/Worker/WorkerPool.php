@@ -67,11 +67,17 @@ final class WorkerPool
         return null;
     }
 
+    /**
+     * How many workers are holding a job. Counts a worker that was drained
+     * mid-job too - it is still working, which is exactly what a shutdown
+     * needs to wait for.
+     */
     public function busyCount(): int
     {
         $count = 0;
+
         foreach ($this->workers as $worker) {
-            if ($worker->isBusy()) {
+            if ($worker->isWorking()) {
                 $count++;
             }
         }
@@ -132,7 +138,7 @@ final class WorkerPool
      * null case and a wasted sleep in the others. A caller that wants to
      * idle for a while does its own sleeping.
      */
-    public function poll(?float $timeout = 0.0): ?WorkerResult
+    public function poll(?float $timeout = 0.0): ?WorkerOutcome
     {
         $this->reap();
 
@@ -140,7 +146,9 @@ final class WorkerPool
             $read = [];
             $streamWorkers = [];
             foreach ($this->workers as $worker) {
-                if (!$worker->isBusy()) {
+                // isWorking(), not isBusy(): a worker drained mid-job is
+                // DRAINING, and its last answer still has to be read.
+                if (!$worker->isWorking()) {
                     continue;
                 }
                 $stream = $worker->getStream();
@@ -177,8 +185,9 @@ final class WorkerPool
 
                 // Already selected as readable, so this does not wait.
                 $outcome = $worker->collect(0.0);
+
                 if ($outcome !== null) {
-                    return new WorkerResult($worker, $outcome);
+                    return $outcome;
                 }
             }
 

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Job;
 
+use ValueError;
+
 /**
  * How urgent a job is - PLAN.md Phase 13.
  *
@@ -18,8 +20,15 @@ enum JobPriority
     case NORMAL;
     case LOW;
 
+    /** Rebuilds a case from the name toArray() wrote - see JobState::fromName(). */
     public static function fromName(string $name): self
     {
-        return constant("self::$name");
+        foreach (self::cases() as $case) {
+            if ($case->name === $name) {
+                return $case;
+            }
+        }
+
+        throw new ValueError(sprintf('"%s" is not a valid job priority', $name));
     }
 }

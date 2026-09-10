@@ -6,7 +6,6 @@ namespace App\Queue;
 
 use App\Job\Job;
 use App\Job\JobPriority;
-use App\Job\JobState;
 use App\Scheduler\DelayedJobScheduler;
 use App\Support\Clock;
 use App\Support\SystemClock;
@@ -52,21 +51,9 @@ final class PriorityQueue implements Queue
 
     public function push(Job $job, int $delay = 0): void
     {
-        if ($job->getState() === JobState::CREATED) {
-            $delay > 0
-                ? $job->markDelayed($this->clock->now() + $delay)
-                : $job->markReady($this->clock->now());
+        if (!$this->scheduler->holdIfNotDue($job, $delay, $this->clock->now())) {
+            $this->ready[$job->getPriority()->name][] = $job;
         }
-
-        $availableAt = $job->getAvailableAt();
-
-        if ($job->getState() === JobState::DELAYED || ($availableAt !== null && $availableAt > $this->clock->now())) {
-            $this->scheduler->schedule($job);
-
-            return;
-        }
-
-        $this->ready[$job->getPriority()->name][] = $job;
     }
 
     public function pop(?float $now = null): ?Job

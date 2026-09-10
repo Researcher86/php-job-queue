@@ -38,25 +38,14 @@ final class InMemoryQueue implements Queue
 
     public function push(Job $job, int $delay = 0): void
     {
-        if ($job->getState() === JobState::CREATED) {
-            $delay > 0
-                ? $job->markDelayed($this->clock->now() + $delay)
-                : $job->markReady($this->clock->now());
+        // Waiting or not is the scheduler's decision, and the same one for
+        // both queues - see DelayedJobScheduler::holdIfNotDue().
+        if (!$this->scheduler->holdIfNotDue($job, $delay, $this->clock->now())) {
+            $this->ready[] = $job;
         }
 
-        $availableAt = $job->getAvailableAt();
-
-        // Two separate reasons to wait, one mechanism - see
-        // DelayedJobScheduler. DELAYED is a job dispatched with a delay; a
-        // READY job with a future availableAt is a retry under backoff.
-        if ($job->getState() === JobState::DELAYED || ($availableAt !== null && $availableAt > $this->clock->now())) {
-            $this->scheduler->schedule($job);
-            $this->persist($job);
-
-            return;
-        }
-
-        $this->ready[] = $job;
+        // Either way the job's state changed, and the log has to know:
+        // recovery reads the LAST thing written about a job.
         $this->persist($job);
     }
 
@@ -114,7 +103,7 @@ final class InMemoryQueue implements Queue
                 $job->markRetry($queue->clock->now());
             }
 
-            if ($job->getState() === JobState::READY || $job->getState() === JobState::DELAYED) {
+            if (!$job->getState()->isTerminal()) {
                 $queue->push($job);
             }
         }

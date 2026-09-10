@@ -123,7 +123,7 @@ final class WorkerPoolTest extends TestCase
 
         $result = $pool->poll(null);
         $this->assertNotNull($result);
-        $this->assertNull($result->getOutcome()->getResult());
+        $this->assertNull($result->getResult());
         $this->assertTrue($pool->hasDeadWorkers());
 
         $this->assertSame(1, $pool->replaceDeadWorkers());

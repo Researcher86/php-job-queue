@@ -72,6 +72,40 @@ final class DelayedJobScheduler
     }
 
     /**
+     * Decides whether a job being pushed has to wait, and keeps it if so.
+     * Returns true when the scheduler took it, false when the job is
+     * available now and belongs in the caller's ready set.
+     *
+     * This is the whole of a queue's push() decision, in one place, because
+     * both queues were making it identically:
+     *
+     *   - A CREATED job is entering the system, and $delay says when it may
+     *     run. Nothing else may pass a delay: a job coming back from a
+     *     retry already carries its own availableAt, and a second delay
+     *     applied to it would silently move its deadline.
+     *   - Anything with a deadline in the future waits, whether it got there
+     *     by markDelayed() (a delay) or markRetry() (a backoff).
+     *
+     * @param int $delay seconds, and only meaningful for a CREATED job
+     */
+    public function holdIfNotDue(Job $job, int $delay, float $now): bool
+    {
+        if ($job->getState() === JobState::CREATED) {
+            $delay > 0 ? $job->markDelayed($now + $delay) : $job->markReady($now);
+        }
+
+        $availableAt = $job->getAvailableAt();
+
+        if ($job->getState() !== JobState::DELAYED && ($availableAt === null || $availableAt <= $now)) {
+            return false;
+        }
+
+        $this->schedule($job);
+
+        return true;
+    }
+
+    /**
      * Every job whose deadline has passed, in deadline order, removed from
      * the scheduler.
      *

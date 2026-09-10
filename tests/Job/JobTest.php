@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace App\Tests\Job;
 
 use App\Job\Job;
+use App\Job\JobPriority;
 use App\Job\JobState;
 use App\Tests\Support\FakeClock;
 use LogicException;
 use PHPUnit\Framework\TestCase;
+use ValueError;
 
 final class JobTest extends TestCase
 {
@@ -104,7 +106,7 @@ final class JobTest extends TestCase
     public function testInvalidTransitionIsRejected(): void
     {
         $this->expectException(LogicException::class);
-        $this->expectExceptionMessage('Invalid transition: cannot move job from CREATED to PROCESSING');
+        $this->expectExceptionMessage('Invalid transition: cannot dispatch a job in state CREATED');
 
         $job = Job::create(type: 'test');
         $job->markProcessing();
@@ -254,5 +256,22 @@ final class JobTest extends TestCase
         $this->assertSame($job->getMaxAttempts(), $restored->getMaxAttempts());
         $this->assertSame($job->getCreatedAt(), $restored->getCreatedAt());
         $this->assertSame($job->getAvailableAt(), $restored->getAvailableAt());
+    }
+
+    public function testAnUnknownStateNameIsRejected(): void
+    {
+        $this->expectException(ValueError::class);
+        $this->expectExceptionMessage('"TRANSITIONS" is not a valid job state');
+
+        // Not a hypothetical: fromName() used to be constant("self::$name"),
+        // which would happily resolve any constant on the class.
+        JobState::fromName('TRANSITIONS');
+    }
+
+    public function testAnUnknownPriorityNameIsRejected(): void
+    {
+        $this->expectException(ValueError::class);
+
+        JobPriority::fromName('URGENT');
     }
 }

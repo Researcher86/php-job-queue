@@ -129,8 +129,8 @@ final class JobDispatcher
     {
         $applied = 0;
 
-        for ($result = $this->workerPool->poll($timeout); $result !== null; $result = $this->workerPool->poll()) {
-            $this->applyResult($result->getWorker(), $result->getOutcome());
+        for ($outcome = $this->workerPool->poll($timeout); $outcome !== null; $outcome = $this->workerPool->poll()) {
+            $this->applyResult($outcome);
             $applied++;
         }
 
@@ -342,7 +342,7 @@ final class JobDispatcher
             $worker->assign($job);
         } catch (WorkerDiedException) {
             $this->monitor->release($job);
-            $this->takeStart($job, $this->clock->now());
+            $this->takeStart($job);
             $job->markRetry($this->clock->now());
             $this->queue->push($job);
             $this->workerPool->maintain();
@@ -353,7 +353,7 @@ final class JobDispatcher
         return true;
     }
 
-    private function applyResult(Worker $worker, WorkerOutcome $outcome): void
+    private function applyResult(WorkerOutcome $outcome): void
     {
         $job = $outcome->getJob();
 
@@ -383,10 +383,11 @@ final class JobDispatcher
             return;
         }
 
-        $this->metrics?->recordLatency(
-            MetricsCollector::LATENCY_EXECUTION,
-            $this->clock->now() - $this->takeStart($job, $outcome->getStartedAt()),
-        );
+        $startedAt = $this->takeStart($job);
+
+        if ($startedAt !== null) {
+            $this->metrics?->recordLatency(MetricsCollector::LATENCY_EXECUTION, $this->clock->now() - $startedAt);
+        }
 
         if ($result->isSuccess()) {
             $job->markCompleted();
@@ -432,10 +433,16 @@ final class JobDispatcher
         $this->startedAt[$job->getId()->toString()] = $this->clock->now();
     }
 
-    private function takeStart(Job $job, float $fallback): float
+    /**
+     * When this job was dispatched, per the injected clock, removing the
+     * record. Null for a job dispatched by something other than this
+     * dispatcher - a test driving a Worker directly - which simply has no
+     * execution latency to report.
+     */
+    private function takeStart(Job $job): ?float
     {
         $id = $job->getId()->toString();
-        $startedAt = $this->startedAt[$id] ?? $fallback;
+        $startedAt = $this->startedAt[$id] ?? null;
         unset($this->startedAt[$id]);
 
         return $startedAt;
