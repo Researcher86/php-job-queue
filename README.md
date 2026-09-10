@@ -26,10 +26,10 @@ All 16 phases of [PLAN.md](PLAN.md) are done, 210 tests, PHPStan level 8
 clean.
 
 `Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
-`Forked worker pool` · `Dispatcher` · `ACK / NACK` · `Fixed and exponential
-retry` · `Visibility timeout` · `Dead letter queue` · `Worker crash
-recovery` · `Append-only persistence` · `Fair scheduling` · `Metrics` ·
-`Graceful shutdown` · `Stress and chaos tests`
+`Forked worker pool` · `Dispatcher` · `ACK / NACK` · `Delivery leases and
+fencing` · `Fixed and exponential retry` · `Visibility timeout` · `Dead
+letter queue` · `Worker crash recovery` · `Append-only persistence` · `Fair
+scheduling` · `Metrics` · `Graceful shutdown` · `Stress and chaos tests`
 
 ```bash
 make build              # docker image
@@ -61,21 +61,22 @@ PHP 8.5 with `pcntl` and `posix` locally.
 8. [Retries](#retries)
 9. [Delayed jobs](#delayed-jobs)
 10. [Visibility timeout](#visibility-timeout)
-11. [Dead letter queue](#dead-letter-queue)
-12. [Worker crashes](#worker-crashes)
-13. [Persistence](#persistence)
-14. [Priority and starvation](#priority-and-starvation)
-15. [Metrics](#metrics)
-16. [Graceful shutdown](#graceful-shutdown)
-17. [The runtime](#the-runtime)
-18. [At-least-once, and what it costs you](#at-least-once-and-what-it-costs-you)
-19. [Experiments](#experiments)
-20. [Failure matrix](#failure-matrix)
-21. [Performance](#performance)
-22. [Project layout](#project-layout)
-23. [Engineering questions, answered](#engineering-questions-answered)
-24. [What this is not](#what-this-is-not)
-25. [Related projects](#related-projects)
+11. [Deliveries and fencing](#deliveries-and-fencing)
+12. [Dead letter queue](#dead-letter-queue)
+13. [Worker crashes](#worker-crashes)
+14. [Persistence](#persistence)
+15. [Priority and starvation](#priority-and-starvation)
+16. [Metrics](#metrics)
+17. [Graceful shutdown](#graceful-shutdown)
+18. [The runtime](#the-runtime)
+19. [At-least-once, and what it costs you](#at-least-once-and-what-it-costs-you)
+20. [Experiments](#experiments)
+21. [Failure matrix](#failure-matrix)
+22. [Performance](#performance)
+23. [Project layout](#project-layout)
+24. [Engineering questions, answered](#engineering-questions-answered)
+25. [What this is not](#what-this-is-not)
+26. [Related projects](#related-projects)
 
 ---
 
@@ -363,7 +364,7 @@ What the dispatcher does with an answer:
 | failure, attempts left | NACK | READY, after the retry delay |
 | failure, attempts gone | NACK | FAILED, plus a DLQ record |
 | **null result** | the worker died holding the job | READY at once, worker replaced |
-| job is not PROCESSING | a late answer for a job already resolved | counted as a stale ACK, ignored |
+| **not the current delivery** | a late answer for a lease that has been revoked | counted as a stale ACK, ignored |
 
 The last two rows are why a worker reports a
 [`WorkerOutcome`](src/Worker/WorkerOutcome.php) rather than a
@@ -371,8 +372,8 @@ The last two rows are why a worker reports a
 vanished" need different handling, and a `JobResult` has no way to say the
 second one.
 
-The stale-ACK row is the visibility timeout showing through, and it is not
-hypothetical — see [experiments](#experiments).
+The last row is the visibility timeout showing through, and getting it right
+takes more than it looks — see [deliveries and fencing](#deliveries-and-fencing).
 
 ---
 
@@ -459,6 +460,84 @@ stay unacknowledged, not how long a handler may run. A handler slower than
 the timeout gets its job handed to a second worker while the first is still
 working on it — that is the timeout being too short, and it is a
 [real, tested scenario](tests/Chaos/ChaosTest.php).
+
+Which leads straight into the next section, because two workers holding the
+same job at once is only survivable if their answers can be told apart.
+
+---
+
+## Deliveries and fencing
+
+A job can be in two workers' hands at the same time. The deadline passes
+while a slow handler is still running, the job goes back to READY, a second
+worker takes it — and both workers will eventually answer about the same job
+id.
+
+So which one is allowed to acknowledge it?
+
+The obvious answer is "whichever reports while the job is PROCESSING", and
+it is wrong. By the time the first worker's late answer arrives, the job
+really is PROCESSING — the *second* worker put it there. Checking the state
+cannot separate them; it is the same object.
+
+That was a real bug here, and the damage was not a harmless duplicate:
+
+```text
+after two deliveries: state=PROCESSING  attempts=2  leased=true
+after A's late ACK:   state=COMPLETED   leased=false  completed=1
+after B's real NACK:  state=COMPLETED   stale_acks=1
+```
+
+The obsolete answer completed a job the live worker was still running. It
+released the *live* delivery's lease, leaving a job in a worker's hands with
+no deadline that could ever bring it back. And the live worker's real
+answer — a failure — was discarded as stale. The roles were inverted: the
+delivery nobody was waiting for decided the job's fate.
+
+The fix is to give a delivery an identity.
+[`Delivery`](src/Delivery/Delivery.php) is the lease: the job, **which
+handing-out this is**, the worker holding it, when it went out, and when its
+ACK is overdue.
+
+```text
+                    JOB #8f2a
+                        │
+            ┌───────────┴───────────┐
+            ▼                       ▼
+       Delivery 1              Delivery 2
+        worker A                worker B
+         expired                 current     ◄── holds the lease
+            │                       │
+        late ACK                   ACK
+            │                       │
+            ▼                       ▼
+     STALE, ignored             COMPLETED
+     lease untouched
+```
+
+[`VisibilityMonitor`](src/Timeout/VisibilityMonitor.php) holds the delivery
+currently entitled to answer for each job, and the dispatcher fences on it:
+
+```php
+if (!$this->monitor->isCurrent($delivery)) {
+    $this->metrics?->increment(MetricsCollector::STALE_ACKS);
+
+    return;   // and pointedly WITHOUT releasing the lease
+}
+```
+
+That comment is load-bearing. The lease under this job's id belongs to the
+live delivery, and releasing it on a stale answer is what turned a duplicate
+into a losable job.
+
+The generation needed no new counter. `markProcessing()` already increments
+`attempts` exactly once per handing-out, which is why this project says an
+attempt counts a **delivery** rather than a run — the fencing token was
+already in the model and was not being used as one.
+
+This is the shape production systems use: a lease token, a fencing token, an
+SQS receipt handle. The right to acknowledge belongs to a specific claim,
+not to whoever holds the id.
 
 ---
 
@@ -743,12 +822,36 @@ final class ChargePaymentJob
 }
 ```
 
-The key names the **operation**, not the delivery. And
+The key names the **operation**, not the delivery — it comes from the
+producer, so it is the same string on every redelivery. One derived from the
+job id or the attempt number would deduplicate nothing. And
 [`IdempotencyGuard`](src/Idempotency/IdempotencyGuard.php) persists, because
 a restart is exactly when a job that already ran comes back — PROCESSING
 jobs in the log return to READY, side effect and all.
-[`tests/Job/IdempotencyTest.php`](tests/Job/IdempotencyTest.php) charges the
-same order across a simulated crash and asserts one charge.
+
+### And this is deduplication, not exactly-once
+
+Worth being precise about, because the gap is one line of code wide:
+
+```text
+isProcessed()  →  false
+charge         →  the money has moved
+💀              →  markProcessed() never runs
+restart
+isProcessed()  →  still false
+charge         →  AGAIN
+```
+
+[`testACrashBetweenTheChargeAndItsRecordChargesTwice`](tests/Job/IdempotencyTest.php)
+does exactly that — a forked child SIGKILLs itself between the two steps —
+and asserts the double charge.
+
+Closing that window needs the side effect and its record to **commit
+together**: one transaction that both charges and stores the key, or the
+charged system's own idempotency key so the second call is the one that
+deduplicates. Both are properties of the thing being charged, not something
+a queue can hand you. What a queue can do is deliver at least once, say so,
+and leave the seam visible.
 
 ---
 
@@ -811,7 +914,7 @@ whole runtime instead and see what the log alone can restore.
 | worker killed while busy | EOF on its socket | back to READY at once, worker replaced |
 | worker killed while idle | `maintain()` reaper | no job involved; capacity restored |
 | worker killed between check and write | `WorkerDiedException` | back to READY at once |
-| handler slower than the visibility timeout | deadline expires | delivered again; first answer becomes a stale ACK |
+| handler slower than the visibility timeout | deadline expires | delivered again; the expired delivery's answer is fenced out as a stale ACK |
 | worker never answers | visibility timeout | back to READY when the deadline passes |
 | runtime killed with SIGTERM | signal handler | in-flight jobs finish within the grace period |
 | runtime killed with SIGKILL | nothing, until restart | PROCESSING jobs in the log return to READY |
@@ -853,6 +956,7 @@ php-job-queue/
 ├── examples/                       one mechanism each (make example EXAMPLE=…)
 ├── src/
 │   ├── Job/                        Job, JobId, JobState, JobPriority, JobResult
+│   ├── Delivery/                   Delivery — the lease an ACK answers for
 │   ├── Producer/                   Producer, JobFactory
 │   ├── Queue/                      Queue, InMemoryQueue, PriorityQueue,
 │   │                               LaneSelector + StrictPriority/WeightedRoundRobin
@@ -909,11 +1013,14 @@ a lost one.
 **Why can a job execute twice?** Job executed → ACK lost → the queue assumes
 failure → redelivery. Expected in an at-least-once system, and observable
 here in two ways: a crash before the ACK, and a handler that outlives the
-visibility timeout.
+visibility timeout. The second is the harder case, because both workers are
+alive and both will answer — see
+[deliveries and fencing](#deliveries-and-fencing).
 
 **Why must handlers be idempotent?** Because the queue's guarantee is
 at-least-once, and *your* guarantee has to be built on top of it. "Charge
-this card" is not safe to repeat; "charge order #123" is.
+this card" is not safe to repeat; "charge order #123" is — up to the crash
+window that only the charged system itself can close.
 
 **What happens when a worker crashes?** The worker is gone; the job is not.
 That distinction — worker lifecycle is not job lifecycle — is what most of
@@ -930,6 +1037,8 @@ missing, and deliberately:
 * no shared queue between machines, so no distributed locking or leader
   election;
 * no snapshots to bound the persistence replay;
+* no transactional handler boundary — a side effect and its idempotency
+  record cannot commit together, so deduplication keeps a crash window;
 * no autoscaling — the pool size is fixed, because the interesting question
   here is what happens to a **job** when a worker disappears
   ([php-worker-pool](https://github.com/Researcher86/php-worker-pool) is

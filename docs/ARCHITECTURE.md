@@ -33,7 +33,7 @@ something one of those two calls.
 │                                                                        │
 │  Producer ──► Queue ──► JobDispatcher ──► WorkerPool                   │
 │                 │            │                                         │
-│                 │            ├── VisibilityMonitor   (in-flight jobs)  │
+│                 │            ├── VisibilityMonitor   (delivery leases) │
 │                 │            ├── RetryPolicy                           │
 │                 │            ├── DeadLetterQueue                       │
 │                 │            ├── JobStorage          (append-only log) │
@@ -63,6 +63,12 @@ what makes killing one survivable: there is nothing in it to lose.
 The job object a worker sees is a **copy**, rebuilt from JSON. Mutating it
 in the worker changes nothing in the parent. What crosses back is a result,
 and the ACK is what moves the original.
+
+What the worker holds on the parent side is not the job but the **delivery**
+- the lease it was handed the job under. Only the job crosses the wire; the
+lease stays behind, because its whole job is to make the eventual answer
+attributable to one specific handing-out. See
+[invariant 5](#5-only-the-current-delivery-may-acknowledge).
 
 ---
 
@@ -144,7 +150,31 @@ The fix was to recognise the late answer, not to loosen the table.
 *Held by:* `JobTest::testInvalidTransitionIsRejected` and the
 `testCannotMark*` family; `WorkerTest::testWorkerCannotAssignTwice`.
 
-### 5. A failed attempt is not a failed job
+### 5. Only the current delivery may acknowledge
+
+A job can be in two workers' hands at once - the deadline passed while a
+slow handler was still running - and both will answer. The answer that
+counts is the one from the delivery still holding the lease;
+`VisibilityMonitor::isCurrent()` is the fence, and a refused answer changes
+nothing but the `stale_acks` counter.
+
+*Would break it:* asking whether the JOB is PROCESSING instead. It cannot
+work, and it was the bug: by the time the late answer arrives the job is
+PROCESSING again, because the worker that replaced the expired delivery put
+it there. Measured consequence - the obsolete answer completed a job the
+live worker was still running, released the live delivery's lease (leaving a
+job in flight with no deadline that could reclaim it), and the live worker's
+real answer, a failure, was then discarded as stale.
+
+*Also would break it:* releasing the lease on a stale answer "for tidiness".
+The lease under that job's id belongs to the live delivery.
+
+*Held by:*
+`ChaosTest::testALateAnswerFromAnExpiredDeliveryIsNotAppliedToTheNewOne`,
+`ChaosTest::testOnlyTheLiveDeliveryDecidesTheOutcome`,
+`VisibilityMonitorTest::testAStaleDeliveryReleasesNothing`, `DeliveryTest`.
+
+### 6. A failed attempt is not a failed job
 
 `attempts` counts **deliveries**. A NACK with attempts left returns the job
 to READY; only exhausting them reaches FAILED, which is the one state a DLQ
@@ -182,11 +212,15 @@ QueueRuntime::tick()
    │     ├─ WorkerPool::getAvailableWorker()   first IDLE worker
    │     ├─ Queue::pop()                     releases due delayed jobs first
    │     └─ JobDispatcher::dispatch()
-   │           ├─ read availableAt           (before markProcessing clears it)
-   │           ├─ markProcessing()           PROCESSING, attempts 1
-   │           ├─ VisibilityMonitor::track()  deadline = now + timeout
-   │           ├─ metrics: queue_wait        now - availableAt
-   │           └─ Worker::assign()           4-byte length + JSON, on the socket
+   │           ├─ read availableAt      (before markProcessing clears it)
+   │           ├─ markProcessing()      PROCESSING, attempts 1
+   │           ├─ VisibilityMonitor::track()
+   │           │     └─ Delivery: generation 1 (= attempts), worker id,
+   │           │        dispatchedAt, deadline = now + timeout
+   │           ├─ metrics: queue_wait   now - availableAt
+   │           └─ Worker::assign($delivery)
+   │                 └─ only the JOB crosses the wire; the worker keeps
+   │                    the lease, so its answer is attributable
    │
    └─ JobDispatcher::collect($wait)
          ├─ WorkerPool::poll($wait)
@@ -196,11 +230,12 @@ QueueRuntime::tick()
          │           └─ apply('finish') BUSY → IDLE
          │
          └─ applyResult($outcome)
-               ├─ state is PROCESSING?        no → stale ACK, counted, ignored
-               ├─ VisibilityMonitor::release()
-               ├─ metrics: execution          now - dispatchedAt
-               ├─ markCompleted()             COMPLETED
-               ├─ JobStorage::store()         so recovery will not restore it
+               ├─ monitor->isCurrent($delivery)?
+               │     no → stale ACK, counted, ignored, lease untouched
+               ├─ VisibilityMonitor::release($delivery)
+               ├─ metrics: execution   now - $delivery->getDispatchedAt()
+               ├─ markCompleted()      COMPLETED
+               ├─ JobStorage::store()  so recovery will not restore it
                └─ metrics: completed++, end_to_end
 ```
 
@@ -289,7 +324,7 @@ Worker::assign()
    ├─ apply('die')
    └─ throw WorkerDiedException
         └─ JobDispatcher::dispatch() catches
-             ├─ VisibilityMonitor::release()
+             ├─ VisibilityMonitor::release($delivery)
              ├─ markRetry(now)  →  Queue::push()
              └─ maintain()      →  replacement forked
 ```
@@ -302,25 +337,33 @@ delivery; the visibility timeout uses the same accounting.
 The scenario people do not expect, because nothing is broken:
 
 ```text
-t=0    dispatch          PROCESSING, deadline t=30, worker A starts
-t=30   requeueExpired()  deadline passed → markRetry() → READY
+t=0    dispatch          delivery 1 (generation 1) → worker A
+                         PROCESSING, deadline t=30
+t=30   requeueExpired()  deadline passed → lease 1 revoked
+                         → markRetry() → READY
                          (worker A is still running the handler)
-t=31   dispatch          PROCESSING again, attempts 2, worker B starts
-t=45   worker A answers  applyResult(): job is PROCESSING but this answer
-                         belongs to the FIRST delivery… and the state check
-                         cannot tell them apart, so:
-t=60   worker B answers  COMPLETED
-       worker A's answer  → job is no longer PROCESSING → stale ACK
+t=31   dispatch          delivery 2 (generation 2) → worker B
+                         PROCESSING again, attempts 2
+t=45   worker A answers  isCurrent(delivery 1)? the monitor holds
+                         generation 2 → NO → stale_acks++, nothing else
+t=60   worker B answers  isCurrent(delivery 2)? yes → COMPLETED
 ```
 
-The important detail is what `applyResult()` does **not** do with a stale
-answer: it does not release the visibility monitor. What the monitor tracks
-under that job's id by then is the *live* delivery, and releasing it there
-would leave the live one untracked — turning a harmless duplicate into a
-genuinely lost job.
+Two things `applyResult()` must not do with the stale answer, and both were
+once done:
 
-*Held by:* `ChaosTest::testAHandlerSlowerThanTheVisibilityTimeoutRunsTwice`,
-which asserts two runs, two different pids, and one stale ACK.
+- **Apply it.** Reading the job's state instead of the lease accepts it —
+  the job really is PROCESSING at t=45, because worker B put it there.
+- **Release the lease.** What the monitor holds under that job's id at t=45
+  is delivery 2's lease. Releasing it would leave worker B's job in flight
+  with no deadline that could ever reclaim it: a harmless duplicate turned
+  into a losable job.
+
+*Held by:* `ChaosTest::testAHandlerSlowerThanTheVisibilityTimeoutRunsTwice`
+(two runs, two pids, one stale ACK),
+`testALateAnswerFromAnExpiredDeliveryIsNotAppliedToTheNewOne` and
+`testOnlyTheLiveDeliveryDecidesTheOutcome` (the expired delivery changes
+nothing; the live one decides).
 
 ### The runtime itself dies
 
@@ -467,13 +510,14 @@ whole design in one place.
 | DELAYED | the delayed heap | `DelayedJobScheduler` | its deadline |
 | READY, available | the ready set / a lane | the queue | `pop()` |
 | READY, future `availableAt` | the delayed heap | `DelayedJobScheduler` | its deadline |
-| PROCESSING | a worker, and the in-flight set | `VisibilityMonitor` | an ACK, a NACK, or the deadline |
+| PROCESSING | a worker, under a delivery lease | `VisibilityMonitor` | an ACK or NACK **from the current delivery**, or the deadline |
 | COMPLETED | nowhere | nobody — it is done | nothing |
 | FAILED | a DLQ record, if there is a DLQ | a human | `DeadLetterQueue::retry()` |
 
 Read the PROCESSING row twice. It is the only row where responsibility is
-shared with something outside the process, and it is the reason the
-visibility monitor exists.
+shared with something outside the process - and the only row where the job
+can be in two places at once, which is why the lease and not the job id is
+what an answer has to match.
 
 ---
 
@@ -482,6 +526,7 @@ visibility monitor exists.
 | component | owns | deliberately does not know |
 |---|---|---|
 | `Job` | its own lifecycle and the legal transitions | queues, workers, retries |
+| `Delivery` | one handing-out: its generation, its worker, its deadline | why it was handed out, what happens next |
 | `JobFactory` | creating jobs, counting them | where they go |
 | `Producer` | the caller-facing API | job states |
 | `Queue` | holding jobs, ready order | why a job failed |
@@ -490,7 +535,7 @@ visibility monitor exists.
 | `Worker` | one process, the wire, running the handler | attempts, retries, the queue |
 | `WorkerPool` | N processes: which is free, which died | jobs |
 | `JobDispatcher` | what an answer means | how a worker talks, how a queue orders |
-| `VisibilityMonitor` | in-flight jobs and their deadlines | why a job is in flight |
+| `VisibilityMonitor` | which delivery may answer for each job, and when its lease expires | why a job is in flight |
 | `RetryPolicy` | how long to wait | whether to retry at all |
 | `DeadLetterQueue` | jobs that stopped being retried | when to stop |
 | `JobStorage` | a job's last known state, durably | job semantics |
@@ -515,10 +560,10 @@ that can change a state.
 | Fork, wire, crash detection, reaping | [`tests/Worker/WorkerTest.php`](../tests/Worker/WorkerTest.php) |
 | Pool capacity, replacement, draining | [`tests/Worker/WorkerPoolTest.php`](../tests/Worker/WorkerPoolTest.php) |
 | ACK/NACK, retries, DLQ, metrics, restart | [`tests/Dispatcher/JobDispatcherTest.php`](../tests/Dispatcher/JobDispatcherTest.php) |
-| Visibility timeout | [`tests/Timeout/VisibilityMonitorTest.php`](../tests/Timeout/VisibilityMonitorTest.php) |
+| Visibility timeout, leases, fencing | [`VisibilityMonitorTest.php`](../tests/Timeout/VisibilityMonitorTest.php), [`DeliveryTest.php`](../tests/Delivery/DeliveryTest.php) |
 | Dead letter records and manual retry | [`tests/DLQ/DeadLetterQueueTest.php`](../tests/DLQ/DeadLetterQueueTest.php) |
 | Append-only log, torn final record | [`tests/Persistence/FileStorageTest.php`](../tests/Persistence/FileStorageTest.php) |
-| Idempotency across redelivery and restart | [`tests/Job/IdempotencyTest.php`](../tests/Job/IdempotencyTest.php) |
+| Deduplication across redelivery, and the crash window it leaves | [`tests/Job/IdempotencyTest.php`](../tests/Job/IdempotencyTest.php) |
 | Runtime loop, real SIGTERM, grace period | [`tests/Master/QueueRuntimeTest.php`](../tests/Master/QueueRuntimeTest.php) |
 | Crashes, duplicates, slow handlers, restart | [`tests/Chaos/ChaosTest.php`](../tests/Chaos/ChaosTest.php) |
 | 1,000 and 10,000 jobs | [`tests/Stress/StressTest.php`](../tests/Stress/StressTest.php) |

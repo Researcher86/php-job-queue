@@ -91,6 +91,11 @@ things in different failure modes.
 Real queues count receipts too (SQS's `ApproximateReceiveCount`), for the
 same reason.
 
+It also turned out to be the fencing token the system needed. Because
+`markProcessing()` increments it exactly once per handing-out, `(job id,
+attempts)` uniquely names one delivery — see decision 15, which is built on
+that and needed no counter of its own.
+
 ---
 
 ## 5. A worker reports an outcome, not a result
@@ -105,6 +110,9 @@ in the DLQ, because the job was tried and did not work. A crash consumes
 nothing conclusive and puts the job straight back, because nothing reported
 anything about it. Encoding a crash as a failure would have made
 `maxAttempts` count worker deaths against a job that may be perfectly fine.
+
+The outcome also carries the `Delivery` rather than the job, so the answer
+can be attributed to one specific handing-out — see decision 15.
 
 ---
 
@@ -289,24 +297,73 @@ saying exactly why a runtime must not be built on it.
 
 ---
 
-## 15. A late answer is counted and ignored
+## 15. An ACK is attributed to a delivery, not to a job id
 
-**Chosen:** `applyResult()` checks that the job is still PROCESSING; if not,
-it increments `stale_acks` and returns — pointedly **without** releasing the
-visibility monitor.
+**Chosen:** every handing-out of a job is a `Delivery` — the job, which
+handing-out this is, the worker, when it went out, when its ACK is overdue.
+`VisibilityMonitor` holds the delivery currently entitled to answer for each
+job, and `applyResult()` fences on `isCurrent($delivery)`.
 
-**Why:** the answer belongs to a delivery nobody is waiting for any more,
-but what the monitor tracks under that job's id is the *live* delivery.
-Releasing there would leave the live delivery untracked, and a job with no
-deadline and no worker accountable for it is a lost job. So a harmless
-duplicate would have become a real loss.
+**Rejected:** checking whether the JOB is still PROCESSING, which is what it
+did first.
+
+**Why:** the state check cannot work, and this is the most interesting bug
+the project has had. A job can legitimately be in two workers' hands at once
+— the deadline expires while a slow handler is still running — and by the
+time the first worker's late answer arrives the job genuinely IS PROCESSING,
+because the *second* worker put it there. Same object, same state, two
+deliveries, nothing to tell them apart.
+
+Measured before fixing it, worker A slow, deadline expired, worker B given
+the job, A answering first:
+
+```text
+after 2 deliveries: state=PROCESSING attempts=2 tracked=true
+after A's late ACK: state=COMPLETED  tracked=false  completed=1
+after B's real NACK: state=COMPLETED stale_acks=1
+```
+
+Three failures in one line of output. The obsolete answer completed a job
+the live worker was still running. It released the LIVE delivery's tracking,
+leaving a job in a worker's hands with no deadline that could ever bring it
+back — a duplicate delivery turned into a losable job. And worker B's real
+answer, a failure, was discarded as stale: a job that failed was recorded
+completed. The roles were inverted.
+
+**Where the generation comes from:** nowhere new.
+`Job::markProcessing()` already increments `attempts` exactly once per
+handing-out, which is why decision 4 says an attempt counts a delivery
+rather than a run. The fencing token was in the model already and was not
+being used as one.
+
+**Two things the fence must not do**, both of which it once did: apply a
+stale answer, and release the lease on one. The lease under that job's id
+belongs to the live delivery.
 
 Counting rather than silently dropping, because a rising `stale_acks` has a
 diagnosis: the visibility timeout is shorter than the work it is timing.
 
-**Bug this fixed:** the second answer walked into `markCompleted()` on an
-already-COMPLETED job and threw `LogicException` out of the dispatch loop.
-Found by writing the slow-handler chaos test, not by review.
+**Also fixed by the same change:** the dispatcher's `startedAt` map, keyed by
+job id, so two deliveries of one job shared an entry and whichever answered
+first consumed it — an execution latency attributed to the wrong delivery.
+`Delivery::getDispatchedAt()` replaced the map.
+
+**Prior art:** this is a lease token, a fencing token, an SQS receipt handle.
+The right to acknowledge belongs to a specific claim, not to whoever holds
+the id.
+
+---
+
+## 15a. And the earlier bug the state check was introduced for
+
+Before any of the above, there was no stale check at all: the second
+answer walked into `markCompleted()` on an already-COMPLETED job and threw
+`LogicException` out of the dispatch loop. Found by writing the
+slow-handler chaos test, not by review — and the state check that fixed it
+was itself only right for the case that test covered.
+
+Worth recording because it is a pattern: a fix aimed at the symptom (an
+exception) that stopped short of the cause (deliveries had no identity).
 
 ---
 
@@ -361,6 +418,42 @@ consistency with a document.
 
 ---
 
+## 19. The idempotency guard is deduplication, and says so
+
+**Chosen:** `IdempotencyGuard` is documented as a deduplication mechanism,
+with the crash window it leaves stated explicitly and covered by a test that
+demonstrates a double charge.
+
+**Rejected:** the earlier wording, which claimed exactly-once could be
+"built at the other end, by the handler, out of at-least-once delivery plus
+a key it can check. That is the whole of it."
+
+**Why:** it is not the whole of it. Checking the key and performing the side
+effect are two steps, and so are the side effect and recording it:
+
+```text
+isProcessed()  →  false
+charge         →  the money has moved
+💀              →  markProcessed() never runs
+restart        →  isProcessed() is still false, so it charges AGAIN
+```
+
+A forked child SIGKILLs itself between the two steps in
+`IdempotencyTest::testACrashBetweenTheChargeAndItsRecordChargesTwice`, and
+the assertion is the double charge. Making the limit observable is worth
+more than a caveat next to it, and it is the same principle as
+demonstrating starvation rather than describing it (decision 11).
+
+Closing the window needs the side effect and its record to commit together —
+one transaction that does both, or the charged system's own idempotency key.
+Both are properties of the thing being charged, not something a queue can
+provide. What a queue can do is deliver at least once, say so, and leave the
+seam visible.
+
+---
+
+---
+
 ## Rejected outright
 
 Things that were considered and left out, with the reason.
@@ -374,4 +467,6 @@ Things that were considered and left out, with the reason.
 | A network protocol | Would need auth, framing over TCP, and payload validation — all of it orthogonal to job semantics. |
 | Serializing exceptions across the socket | Not reliably possible, and the stack refers to a dead process. Class plus message is what a human needs. |
 | `SIGCHLD`-driven reaping | An async handler racing the poll loop is a known source of ordering bugs. One `waitpid` per tick is enough. |
-| A `ProcessingQueue` class | The in-flight set is the visibility monitor's, and it needs the deadlines anyway. A second holder of the same jobs would be two sources of truth. |
+| A `ProcessingQueue` class | The in-flight set is the visibility monitor's, and it needs the leases and deadlines anyway. A second holder of the same jobs would be two sources of truth. |
+| A UUID per delivery | The attempt count already identifies a handing-out uniquely and reads better in a log ("delivery 2"). A second identifier would have to be kept in step with the first. |
+| Making the idempotency guard transactional | It cannot be, from here — the side effect belongs to something else. See decision 19. |

@@ -1130,16 +1130,42 @@ The same job may execute more than once.
 
 ### Implementation
 
-`Timeout/VisibilityMonitor` holds the in-flight set and the deadlines.
-Tracking and expiry are separate: every dispatched job is tracked, and a
-null timeout only means nothing can become overdue - so the "processing"
-gauge is honest either way, and whether to reclaim jobs stays a matter of
-configuration.
+`Timeout/VisibilityMonitor` holds a **lease** per in-flight job -
+`Delivery/Delivery`: which handing-out of the job this is, the worker
+holding it, when it went out, and when its ACK is overdue. Tracking and
+expiry are separate: every dispatched job gets a lease, and a null timeout
+only means the lease can never go overdue - so the "processing" gauge is
+honest either way, the fencing check keeps working, and whether to reclaim
+jobs stays a matter of configuration.
 
 Nothing checks the deadlines on a timer of its own.
-`QueueRuntime::requeueExpired()` runs once per tick, and
-`nextDeadline()` is what lets the tick sleep until there is something to
-check.
+`QueueRuntime::requeueExpired()` runs once per tick, and `nextDeadline()`
+is what lets the tick sleep until there is something to check.
+
+### The lease is why this phase is not just a deadline
+
+The timeout creates a situation the rest of the system has to survive: the
+same job in two workers' hands at once. Both will answer, about the same
+job id, and only one of them is answering the delivery that is still
+current.
+
+Asking whether the JOB is PROCESSING cannot separate them - by the time
+the first worker's late answer arrives the job genuinely is PROCESSING,
+because the second worker put it there. Measured with that check in place:
+the obsolete answer completed a job the live worker was still running,
+released the live delivery's lease (leaving a job in flight with no
+deadline that could reclaim it), and the live worker's real answer, a
+failure, was then discarded as stale.
+
+So `JobDispatcher::applyResult()` fences on
+`VisibilityMonitor::isCurrent($delivery)`, and a refused answer changes
+nothing but the `stale_acks` counter - in particular it does not release
+the lease, which belongs to the live delivery.
+
+The generation needed no new counter: `markProcessing()` already
+increments `attempts` exactly once per handing-out, which is why this
+project calls an attempt a delivery. See
+[docs/DECISIONS.md](docs/DECISIONS.md) entry 15.
 
 ### Tests
 
@@ -1150,6 +1176,11 @@ check.
 * [x] A released job is no longer processing
 * [x] A null timeout tracks without ever expiring
 * [x] An expired job is dispatched again end to end
+* [x] An expired delivery stops being current once the job is reissued
+* [x] A stale delivery releases nothing
+* [x] A late answer from an expired delivery is not applied to the new one
+* [x] Only the live delivery decides the outcome
+* [x] A handler slower than the timeout runs twice, in two workers
 
 ---
 
@@ -1846,14 +1877,18 @@ were not slow. They were queued.
       twice, in two different workers, with nothing broken
 * [x] Always-failing job → attempts exhausted → DLQ
 * [x] Duplicate execution before ACK → the same job charged only once,
-      because the handler is idempotent
+      because the handler deduplicates
+* [x] A crash between the charge and its record → charged TWICE, which is
+      the limit of deduplication without a shared transaction
 
-The slow-job test found a real bug: the second worker's answer arrived for a
-job the first had already completed, and `markCompleted()` threw out of the
-dispatch loop. A late answer is now counted (`stale_acks`) and ignored -
-without releasing the visibility monitor, since what it tracks under that
-job's id is the live delivery, and releasing it there would have turned a
-harmless duplicate into a genuinely lost job.
+The slow-job test found two bugs, one after the other. First: the second
+worker's answer arrived for a job the first had already completed, and
+`markCompleted()` threw out of the dispatch loop. That was fixed by
+counting a late answer as `stale_acks` and ignoring it - which was right
+for the case the test covered and wrong in general, because it identified
+the answer by the job's STATE. The second bug was that check itself; see
+Phase 9's implementation notes and
+[docs/DECISIONS.md](docs/DECISIONS.md) entry 15.
 
 ---
 
