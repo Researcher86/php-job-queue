@@ -10,6 +10,22 @@ use App\Support\Clock;
 use App\Support\SystemClock;
 use Throwable;
 
+/**
+ * Where jobs go when retrying them has stopped being useful - PLAN.md
+ * Phase 10.
+ *
+ * Without it, a job that can never succeed has two possible endings, and
+ * both are bad: retry forever, burning workers on work that will not
+ * complete, or drop it, and lose the fact that it existed. The DLQ is the
+ * third: stop trying, keep everything, and wait for a human.
+ *
+ * So a record holds the job, the exception that finished it, the attempt
+ * count and the time - enough to answer "what broke, and how often" without
+ * going to the logs. And retry() puts a job back once whatever was broken
+ * is fixed, which is why this is a queue and not a log file.
+ *
+ * Keyed by job id, so a job cannot be dead-lettered twice.
+ */
 final class DeadLetterQueue
 {
     private Clock $clock;

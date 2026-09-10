@@ -11,6 +11,48 @@ use LogicException;
 use RuntimeException;
 use Throwable;
 
+/**
+ * One worker process, and the Master side's handle on it: its pid, the
+ * socket to it, its state, and the job it is holding.
+ *
+ * A worker is a real forked process, not an object that calls a handler.
+ * That is the point of the whole project: a handler that segfaults, blocks
+ * forever, or is SIGKILLed takes its process down and nothing else, and
+ * what happens to its JOB then is the interesting question.
+ *
+ * ## Both sides live in this class
+ *
+ * After spawn(), the same object exists in two processes. The parent uses
+ * assign()/collect() and never enters workerLoop(); the child runs
+ * workerLoop() and exits from it. Keeping the pair together is deliberate -
+ * the wire format is stated once, and reading one method tells you what the
+ * other must be doing.
+ *
+ * ## The wire
+ *
+ * A Unix socket pair, carrying length-prefixed JSON frames:
+ *
+ *   [4-byte big-endian length][payload]
+ *
+ * The length prefix is what makes a partial read detectable. A stream
+ * socket is free to deliver half a message, and "read what is available and
+ * hope" is how an IPC layer starts silently truncating payloads under load.
+ * With the prefix, a short read is either completed or an EOF - and an EOF
+ * mid-frame means the process died, which is the single most important
+ * thing this class has to be able to tell.
+ *
+ * ## What a job's result is not
+ *
+ * A handler's return value is ignored unless it is a JobResult; anything
+ * else, including null, is success. A thrown Throwable is failure. So a
+ * handler is written as ordinary code that either works or throws, and does
+ * not have to know this class exists.
+ *
+ * The exception itself cannot cross the socket - it may not be
+ * serializable, and its stack refers to a process that is gone - so its
+ * class and message do, and a stand-in is rebuilt on the other side. What
+ * survives is what the DLQ needs to show a human.
+ */
 final class Worker
 {
     /**

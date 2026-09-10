@@ -21,6 +21,44 @@ use App\Worker\WorkerOutcome;
 use App\Worker\WorkerPool;
 use Throwable;
 
+/**
+ * The middle of the system: takes jobs off a queue, gives them to free
+ * workers, and decides what each answer means - PLAN.md Phases 5 to 7.
+ *
+ * Everything else in the project is a piece this one holds together, and
+ * all of them are optional. Given only a queue and a pool it dispatches
+ * and completes jobs; given a RetryPolicy it retries them, a
+ * DeadLetterQueue it retires the hopeless ones, a JobStorage it survives
+ * its own death, a MetricsCollector it can be watched, a visibility
+ * timeout it recovers jobs whose worker vanished. That is why they are
+ * nullable constructor arguments rather than required collaborators: each
+ * one is a mechanism you can read on its own, and see the system work
+ * without.
+ *
+ * ## Two halves, deliberately apart
+ *
+ * dispatchPending() fills every free worker; collect() applies every
+ * answer that arrived. Keeping them separate is what lets a pool of N run
+ * N jobs at once - a loop that waits for each job before dispatching the
+ * next has a pool of one, whatever its size says. drain() and
+ * QueueRuntime are both those two halves in a loop; they differ only in
+ * when they decide to stop.
+ *
+ * ## What an answer means
+ *
+ *   result is success        -> ACK  -> COMPLETED
+ *   result is failure, tries -> NACK -> READY, after the retry delay
+ *   result is failure, done  -> NACK -> FAILED, and a DLQ record
+ *   result is NULL           -> the worker died holding the job, so it
+ *                               goes straight back to READY and the worker
+ *                               is replaced. Not a failed attempt: nothing
+ *                               reported anything.
+ *   the job is not PROCESSING -> a late answer for a job already resolved,
+ *                               counted as a stale ACK and ignored
+ *
+ * The last one is the visibility timeout showing through: see
+ * applyResult().
+ */
 final class JobDispatcher
 {
     private VisibilityMonitor $monitor;

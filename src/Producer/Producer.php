@@ -8,6 +8,18 @@ use App\Job\Job;
 use App\Job\JobPriority;
 use App\Queue\Queue;
 
+/**
+ * The application's way in - PLAN.md Phase 3.
+ *
+ * A one-line seam: dispatch a type and a payload, and the job is created
+ * and queued. Application code that uses this never touches a Job object, a
+ * state, or a queue implementation, which is the whole point - the caller's
+ * side of an asynchronous system should be as small as the synchronous call
+ * it replaced.
+ *
+ * It returns the Job anyway, because a test wants to follow the thing it
+ * just dispatched.
+ */
 final readonly class Producer
 {
     public function __construct(

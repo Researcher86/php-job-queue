@@ -6,6 +6,16 @@ namespace App\Job;
 
 use Throwable;
 
+/**
+ * What a handler decided: ACK or NACK - PLAN.md Phase 6.
+ *
+ * Constructed only through success() and failure(), so a failure always
+ * carries its exception. "It failed" without a reason is not a state the
+ * DLQ could do anything with.
+ *
+ * Note what this cannot express: a worker that died. That is why a worker
+ * reports a WorkerOutcome, whose result may be null - see WorkerOutcome.
+ */
 final readonly class JobResult
 {
     private function __construct(
