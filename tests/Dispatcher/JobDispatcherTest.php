@@ -406,6 +406,26 @@ final class JobDispatcherTest extends TestCase
         $pool->shutdown();
     }
 
+    public function testDispatcherCountsWorkerCrashOnceWithSharedMetrics(): void
+    {
+        $metrics = new MetricsCollector();
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            posix_kill(getmypid(), SIGKILL);
+        }, $metrics);
+        $pool->start();
+
+        $job = Job::create(type: 'crash', maxAttempts: 1);
+        $queue = new InMemoryQueue(new FakeClock());
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, new FixedDelayRetry(0), metrics: $metrics);
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(1, $metrics->getCounter('worker_crashes'));
+
+        $pool->shutdown();
+    }
+
     public function testShutdownStopsDispatchingWithoutLosingJobs(): void
     {
         $clock = new FakeClock(1000.0);

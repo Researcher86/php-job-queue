@@ -47,6 +47,21 @@ final class PriorityQueueTest extends TestCase
         $this->assertSame('low', $this->queue->pop()?->getType());
     }
 
+    public function testThreeWayPriorityOrdering(): void
+    {
+        $low = Job::create(type: 'low', priority: JobPriority::LOW);
+        $normal = Job::create(type: 'normal', priority: JobPriority::NORMAL);
+        $high = Job::create(type: 'high', priority: JobPriority::HIGH);
+
+        $this->queue->push($low);
+        $this->queue->push($normal);
+        $this->queue->push($high);
+
+        $this->assertSame('high', $this->queue->pop()->getType());
+        $this->assertSame('normal', $this->queue->pop()?->getType());
+        $this->assertSame('low', $this->queue->pop()?->getType());
+    }
+
     public function testFifoOrderWithinSamePriority(): void
     {
         $a = Job::create(type: 'a', priority: JobPriority::HIGH);

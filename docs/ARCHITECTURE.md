@@ -42,6 +42,9 @@ How does the job lifecycle work?
 * [Failed Jobs](#failed-jobs)
 * [Worker Crashes](#worker-crashes)
 * [Concurrency](#concurrency)
+* [Main Event Loop](#main-event-loop)
+* [Failure Matrix](#failure-matrix)
+* [Worker IPC Protocol](#worker-ipc-protocol)
 * [Graceful Shutdown](#graceful-shutdown)
 * [Component Responsibilities](#component-responsibilities)
 * [Important Invariants](#important-invariants)
@@ -1308,6 +1311,91 @@ Mark Reserved
 
 atomically
 ```
+
+---
+
+# Main Event Loop
+
+The whole system is one event loop driven by `stream_select` — no busy polling:
+
+```text
+while accepting:
+
+  dispatch:
+    for each available worker:
+      pop next job (priority, then FIFO, promote delayed)
+      → mark processing, track visibility deadline, assign to worker
+
+  poll:
+    stream_select on busy worker sockets (blocks until a result is ready)
+
+  on result:
+    success
+      → mark completed + persist
+    failure
+      → retry policy (attempts left? delay + push : DLQ)
+    crash (worker died mid-job)
+      → mark retry + push, replace dead worker (worker_crashes += 1)
+
+  recovery (periodic or on timeout):
+    requeueExpired()
+      → jobs past their visibility deadline are pushed back to the queue
+
+  on shutdown:
+    stop accepting
+    → drain pool
+    → wait until busyCount() == 0
+    → terminate workers
+```
+
+The interesting part: because the loop is blocking on worker sockets instead
+of sleeping, both dispatch and crash recovery react instantly to whatever
+actually happens.
+
+---
+
+# Failure Matrix
+
+A crash at a different point produces a different guarantee. This is the model
+the whole repository is built on:
+
+| Crash point                        | Expected behavior                                              |
+|------------------------------------|----------------------------------------------------------------|
+| before reservation                 | job remains PENDING, nothing changes                           |
+| after reservation, before dispatch | job becomes visible again (visibility timeout re-queues it)    |
+| during execution                   | worker dies → job returns to queue and is retried              |
+| after business side effect, before ACK | duplicate execution is possible (at-least-once semantics)  |
+| after ACK                          | no retry — job is COMPLETED                                    |
+| during persistence                 | recovery required; last written state wins                     |
+| after idempotency claim            | depends on ordering of claim vs. side effect                   |
+
+The interesting boundary is *"side effect written, ACK not yet sent"*. That gap
+is where at-least-once delivery turns into duplicate execution, and why
+handlers must be idempotent.
+
+---
+
+# Worker IPC Protocol
+
+Worker and parent communicate over a UNIX socket pair created by
+`stream_socket_pair()`. The framing is length-prefixed, not newline-delimited:
+
+```text
+[ 4-byte big-endian length ][ JSON payload ]
+```
+
+* Parent → worker: payload is the serialized Job.
+* Worker → parent: payload is the result (`success`, `exceptionClass`, `exceptionMessage`).
+
+Writes are buffered-safe (`writeAll` — loop until every byte is written) and
+reads are exact (`readExact` — loop until N bytes are read). A premature EOF on
+the parent side of the socket means the worker died; the dispatcher treats it
+as a crash and re-queues the job.
+
+Because framing is length-prefixed, messages can be arbitrarily large and the
+protocol is robust against partial reads/writes. The socket is trusted local
+IPC between a parent process and its own forked children — messages are not
+validated as hostile input.
 
 ---
 

@@ -134,6 +134,16 @@ final class JobDispatcher
     {
         $this->accepting = false;
         $this->workerPool->drain();
+
+        // Wait for in-flight jobs to finish before tearing the pool down.
+        while ($this->workerPool->busyCount() > 0) {
+            $result = $this->workerPool->poll(true);
+            if ($result !== null) {
+                $this->applyResult($result->getWorker(), $result->getOutcome());
+            }
+        }
+
+        $this->workerPool->shutdown();
     }
 
     private function applyResult(Worker $worker, WorkerOutcome $outcome): void
@@ -145,7 +155,6 @@ final class JobDispatcher
         if ($result === null) {
             $job->markRetry($this->clock->now());
             $this->queue->push($job);
-            $this->metrics?->increment('worker_crashes');
             $this->workerPool->replaceDeadWorkers();
             return;
         }
