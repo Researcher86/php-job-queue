@@ -1,1981 +1,525 @@
-# PHP Job Queue Architecture
+# Architecture
 
-> Architecture and internal data flow of an educational background job queue written in PHP.
+The [README](../README.md) is the tour: what each mechanism is and why it
+exists. This is the layer under it — the invariants, the state machines,
+what happens in what order when something breaks, and where each claim is
+held by a test.
 
-This document describes how the main components of `php-job-queue` work together.
-
-The goal is not to document every implementation detail.
-
-The goal is to provide a **mental model of a background job processing system**.
-
-If you forget how something works, this document should help answer:
-
-```text
-What component is responsible for this?
-
-Where does a job come from?
-
-Where does it go next?
-
-What happens when processing fails?
-
-What happens when a Worker crashes?
-
-How does the job lifecycle work?
-```
+If you are reading the code, read this alongside
+[`JobDispatcher`](../src/Dispatcher/JobDispatcher.php) and
+[`QueueRuntime`](../src/Master/QueueRuntime.php); everything else is
+something one of those two calls.
 
 ---
 
-# Table of Contents
+## Contents
 
-* [Architecture Overview](#architecture-overview)
-* [Core Concepts](#core-concepts)
-* [Core Components](#core-components)
-* [Job Lifecycle](#job-lifecycle)
-* [Producer Flow](#producer-flow)
-* [Worker Lifecycle](#worker-lifecycle)
-* [Job Processing Flow](#job-processing-flow)
-* [Queue Architecture](#queue-architecture)
-* [Reservation and Visibility](#reservation-and-visibility)
-* [Retries](#retries)
-* [Delayed Jobs](#delayed-jobs)
-* [Failed Jobs](#failed-jobs)
-* [Worker Crashes](#worker-crashes)
-* [Concurrency](#concurrency)
-* [Main Event Loop](#main-event-loop)
-* [Failure Matrix](#failure-matrix)
-* [Worker IPC Protocol](#worker-ipc-protocol)
-* [Graceful Shutdown](#graceful-shutdown)
-* [Component Responsibilities](#component-responsibilities)
-* [Important Invariants](#important-invariants)
-* [Mental Model](#mental-model)
+1. [Processes and what lives where](#processes-and-what-lives-where)
+2. [The invariants](#the-invariants)
+3. [Following one job](#following-one-job)
+4. [Following one failure](#following-one-failure)
+5. [The IPC protocol](#the-ipc-protocol)
+6. [The loop, in detail](#the-loop-in-detail)
+7. [Ownership of a job](#ownership-of-a-job)
+8. [Component responsibilities](#component-responsibilities)
+9. [Where each mechanism is tested](#where-each-mechanism-is-tested)
 
 ---
 
-# Architecture Overview
-
-A job queue separates:
+## Processes and what lives where
 
 ```text
-Producing Work
-
-from
-
-Processing Work
+┌─────────────────────────────────── one PHP process ──────────────────────┐
+│                                                                          │
+│  Producer ──► Queue ──► JobDispatcher ──► WorkerPool                     │
+│                 │            │                │                         │
+│                 │            ├── VisibilityMonitor   (in-flight jobs)    │
+│                 │            ├── RetryPolicy                            │
+│                 │            ├── DeadLetterQueue                        │
+│                 │            ├── JobStorage          (append-only log)   │
+│                 │            └── MetricsCollector                       │
+│                 │                                                        │
+│                 └── DelayedJobScheduler               (min-heap)          │
+│                                                                          │
+│  QueueRuntime drives all of it, and owns the signal handlers             │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                   │  socket pair per worker
+              ┌────────────────────┼────────────────────┐
+              ▼                    ▼                    ▼
+   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+   │ forked process   │ │ forked process   │ │ forked process   │
+   │ Worker::workerLoop() — read frame, run the handler, write   │
+   │ the result, repeat until EOF                                │
+   └──────────────────┘ └──────────────────┘ └──────────────────┘
 ```
 
-Instead of:
+Everything that decides anything is in the parent. A worker holds no queue
+state, no attempt counters, and no opinion about retries — it receives a
+serialized job, runs a callable, and reports success or failure. That is
+what makes killing one survivable: there is nothing in it to lose.
 
-```text
-HTTP Request
-
-↓
-
-Send Email
-
-↓
-
-Generate Report
-
-↓
-
-Process Image
-
-↓
-
-Return Response
-```
-
-the application can do:
-
-```text
-HTTP Request
-
-↓
-
-Create Job
-
-↓
-
-Queue
-
-↓
-
-Return Response
-```
-
-Later:
-
-```text
-Worker
-
-↓
-
-Take Job
-
-↓
-
-Process Job
-```
-
-The complete architecture:
-
-```text
-                        Producers
-                            │
-                            │ dispatch()
-                            ▼
-                  ┌───────────────────┐
-                  │   Job Dispatcher  │
-                  └─────────┬─────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │       Queue       │
-                  └─────────┬─────────┘
-                            │
-                 ┌──────────┼──────────┐
-                 │          │          │
-                 ▼          ▼          ▼
-              Worker A   Worker B   Worker C
-                 │          │          │
-                 └──────────┼──────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │   Job Processor   │
-                  └─────────┬─────────┘
-                            │
-                            ▼
-                  ┌───────────────────┐
-                  │    Job Handler    │
-                  └───────────────────┘
-```
-
-The central idea is:
-
-> **Producers create work. Workers process work. The Queue connects them.**
+The job object a worker sees is a **copy**, rebuilt from JSON. Mutating it
+in the worker changes nothing in the parent. What crosses back is a result,
+and the ACK is what moves the original.
 
 ---
 
-# Core Concepts
+## The invariants
 
-The system is built around several simple concepts.
+Five statements the system is built to keep true. Each one names what would
+break it and the test that would catch it.
 
-```text
-Job
- ↓
-A unit of work
-```
+### 1. A job is never nowhere
 
-Example:
+At every instant a job is in exactly one of: the ready set, the delayed
+heap, the in-flight set, a terminal state, or a DLQ record.
 
-```text
-SendEmailJob
-```
-
----
-
-```text
-Queue
- ↓
-Stores jobs waiting for processing
-```
-
----
-
-```text
-Worker
- ↓
-Takes jobs and executes them
-```
-
----
-
-```text
-Handler
- ↓
-Contains the actual business logic
-```
-
-Example:
-
-```text
-SendEmailHandler
-```
-
----
-
-```text
-Retry
- ↓
-Attempts to process a failed job again
-```
-
----
-
-```text
-Failed Job
- ↓
-A job that can no longer be processed automatically
-```
-
----
-
-# Core Components
-
-The architecture can be divided into several layers.
-
-```text
-┌─────────────────────────────────────┐
-│ Job Creation                        │
-│                                     │
-│ Job                                 │
-│ Dispatcher                          │
-└──────────────────┬──────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────┐
-│ Queue Storage                       │
-│                                     │
-│ Pending Jobs                        │
-│ Reserved Jobs                       │
-│ Delayed Jobs                        │
-│ Failed Jobs                         │
-└──────────────────┬──────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────┐
-│ Job Processing                      │
-│                                     │
-│ Worker                              │
-│ Job Processor                       │
-│ Handler Resolver                    │
-└──────────────────┬──────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────┐
-│ Execution                           │
-│                                     │
-│ Job Handler                         │
-│ Application Logic                   │
-└─────────────────────────────────────┘
-```
-
-The separation is important.
-
-For example:
-
-```text
-Job Handler
-```
-
-should not know about:
-
-```text
-Queue Storage
-```
-
-And:
-
-```text
-Queue
-```
-
-should not know how:
-
-```text
-SendEmailJob
-```
-
-actually sends an email.
-
-The desired flow is:
-
-```text
-Producer
-
-↓
-
-Queue
-
-↓
-
-Worker
-
-↓
-
-Handler
-```
-
----
-
-# Job Lifecycle
-
-A job has a lifecycle.
-
-The basic lifecycle:
-
-```text
-CREATED
-    │
-    ▼
-PENDING
-    │
-    │ Worker takes job
-    ▼
-RESERVED
-    │
-    │ Processing
-    ▼
-RUNNING
-    │
-    ├───────────────┐
-    │               │
-    │ Success       │ Failure
-    ▼               ▼
-COMPLETED         RETRYING
-                    │
-                    │
-                    ├──────► PENDING
-                    │
-                    │ retries exhausted
-                    ▼
-                  FAILED
-```
-
-A simplified view:
-
-```text
-PENDING
-   │
-   ▼
-RESERVED
-   │
-   ▼
-RUNNING
-   │
-   ├── Success ──► COMPLETED
-   │
-   └── Failure ──► RETRY / FAILED
-```
-
----
-
-# Producer Flow
-
-A producer creates a job.
-
-Example:
+The dangerous moment is the handover, so `dispatch()` orders it
+deliberately:
 
 ```php
-$queue->dispatch(
-    new SendEmailJob(
-        to: 'user@example.com',
-        subject: 'Hello',
-    ),
-);
+$job->markProcessing();        // 1. it is no longer available
+$this->monitor->track($job);   // 2. it is now accounted for as in flight
+$worker->assign($job);         // 3. only now does it leave the process
 ```
 
-Internally:
+Registering with the monitor **before** the write is what closes the window.
+If step 3 throws — the worker died between the reaper's check and the write
+— the job is already tracked, and the catch puts it straight back on the
+queue rather than leaving it to a timeout.
 
-```text
-Application
+*Would break it:* writing to the socket first and marking PROCESSING after.
+A crash between the two would leave a job that a worker is running and the
+queue still considers available.
 
-↓
+*Held by:* `ChaosTest::testJobSurvivesDispatchToAWorkerKilledWhileIdle`,
+`JobDispatcherTest::testDispatchDoesNotPopWhenNoWorkerAvailable`.
 
-Job
+### 2. A worker's death is not a job's death
 
-↓
+Two detection paths, and they must not overlap:
 
-Job Dispatcher
+| worker state | detected by | knows the job? |
+|---|---|---|
+| BUSY | EOF on its socket, in `collect()` | **yes** — the outcome names it |
+| IDLE / STARTING | `waitpid(WNOHANG)` in `maintain()` | no job to know |
 
-↓
+`Worker::reap()` therefore checks only IDLE and STARTING. If it reaped busy
+workers too, a busy crash would be noticed by whichever path got there
+first — and the reaper's path cannot report the job, so the job would be
+left to the visibility timeout instead of coming back immediately.
 
-Serialize Job
+*Held by:* `WorkerTest::testReapIgnoresABusyWorker`,
+`ChaosTest::testWorkerCrashDoesNotLoseJob`,
+`ChaosTest::testIdleWorkerCrashIsNoticedAndReplaced`.
 
-↓
+### 3. An unacknowledged job always comes back
 
-Queue Storage
+Either the socket tells us (crash while busy) or the deadline does
+(everything else, including a worker killed by the shutdown grace period, a
+handler that hangs, and a runtime that was SIGKILLed and restarted from the
+log).
 
-↓
+This is what makes every bounded wait in the system safe. `shutdown($grace)`
+can kill a worker mid-job precisely because the job it was holding is still
+tracked and still owed an answer.
 
-PENDING
-```
+*Held by:*
+`QueueRuntimeTest::testAJobKilledByTheGracePeriodComesBackThroughTheTimeout`,
+`VisibilityMonitorTest`, `InMemoryQueueTest::testProcessingJobsReturnToReadyAfterRestart`.
 
-Detailed flow:
+### 4. Only the state machine changes a state
 
-```text
-1. Application creates Job
-        │
-        ▼
-2. Job Dispatcher receives Job
-        │
-        ▼
-3. Job is validated
-        │
-        ▼
-4. Job metadata is created
-        │
-        ▼
-5. Job is stored in Queue
-        │
-        ▼
-6. Job becomes PENDING
-```
+`Job::apply()` is the single gate; there is no other assignment to
+`$this->state` after construction. Same for `Worker::apply()`. An illegal
+transition is a `LogicException`, not a silent no-op, because a state
+machine that tolerates nonsense stops being evidence of anything.
 
-The producer does not wait for processing.
+This is also what caught a real bug: a duplicate delivery whose first
+answer arrived late tried to complete an already-COMPLETED job and threw.
+The fix was to recognise the late answer, not to loosen the table.
 
-That is the main purpose of a background queue.
+*Held by:* `JobTest::testInvalidTransitionIsRejected` and the
+`testCannotMark*` family; `WorkerTest::testWorkerCannotAssignTwice`.
+
+### 5. A failed attempt is not a failed job
+
+`attempts` counts **deliveries**. A NACK with attempts left returns the job
+to READY; only exhausting them reaches FAILED, which is the one state a DLQ
+record is made from. Nothing else writes to the DLQ, and a job in the DLQ is
+FAILED — `DeadLetterQueue::retry()` refuses a record whose job is in any
+other state.
+
+*Held by:* `JobDispatcherTest::testFailedJobIsRetriedWhenAttemptsRemain`,
+`testFailedJobIsFailedAfterExhaustingAttempts`,
+`DeadLetterQueueTest::testRetryRequeuesJobToReady`.
 
 ---
 
-# Queue Architecture
+## Following one job
 
-The Queue stores jobs according to their current state.
-
-Conceptually:
+The happy path, in the order it actually happens.
 
 ```text
-Queue
+Producer::dispatch('send_email', [...])
+   │
+   ├─ JobFactory::create()          CREATED, attempts 0, metrics: created++
+   │
+   └─ Queue::push($job, delay: 0)
+        │
+        ├─ DelayedJobScheduler::holdIfNotDue()
+        │     CREATED + no delay  →  markReady($now)  →  returns false
+        │
+        ├─ ready[] = $job
+        └─ JobStorage::store(id, {state: READY, ...})
 
-├── Pending
-│
-├── Reserved
-│
-├── Delayed
-│
-└── Failed
+QueueRuntime::tick()
+   │
+   ├─ JobDispatcher::dispatchPending()
+   │     ├─ WorkerPool::maintain()          reap idle deaths, replace
+   │     ├─ WorkerPool::getAvailableWorker()   first IDLE worker
+   │     ├─ Queue::pop()                     releases due delayed jobs first
+   │     └─ JobDispatcher::dispatch()
+   │           ├─ read availableAt           (before markProcessing clears it)
+   │           ├─ markProcessing()           PROCESSING, attempts 1
+   │           ├─ VisibilityMonitor::track()  deadline = now + timeout
+   │           ├─ metrics: queue_wait        now - availableAt
+   │           └─ Worker::assign()           4-byte length + JSON, on the socket
+   │
+   └─ JobDispatcher::collect($wait)
+         └─ WorkerPool::poll($wait)
+               ├─ stream_select over every WORKING worker's socket
+               └─ Worker::collect(0.0)
+                     ├─ readFrame()          length prefix, then exactly N bytes
+                     └─ apply('finish')      BUSY → IDLE
+         │
+         └─ applyResult($outcome)
+               ├─ state is PROCESSING?        no → stale ACK, counted, ignored
+               ├─ VisibilityMonitor::release()
+               ├─ metrics: execution          now - dispatchedAt
+               ├─ markCompleted()             COMPLETED
+               ├─ JobStorage::store()         so recovery will not restore it
+               └─ metrics: completed++, end_to_end
 ```
 
-Example:
+Meanwhile, inside the worker:
 
 ```text
-                 ┌───────────────┐
-                 │    PENDING    │
-                 └───────┬───────┘
-                         │
-                         │ Worker takes job
-                         ▼
-                 ┌───────────────┐
-                 │   RESERVED    │
-                 └───────┬───────┘
-                         │
-                         ▼
-                 ┌───────────────┐
-                 │    RUNNING    │
-                 └───────┬───────┘
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-       ┌────────────┐         ┌────────────┐
-       │ COMPLETED  │         │   FAILED   │
-       └────────────┘         └────────────┘
-```
-
-The Queue is responsible for:
-
-```text
-Push Job
-
-↓
-
-Reserve Job
-
-↓
-
-Acknowledge Job
-
-↓
-
-Release Job
-
-↓
-
-Move Delayed Job
-
-↓
-
-Move Failed Job
+workerLoop()
+   ├─ readFrame()                     blocks until the parent writes
+   ├─ Job::fromArray()                a copy, in this process
+   ├─ ($handler)($job)                ordinary code, throws or returns
+   ├─ JobResult::success() / failure($e)
+   └─ writeAll({success, exceptionClass, exceptionMessage})
+   └─ repeat, until the socket closes
 ```
 
 ---
 
-# Worker Lifecycle
+## Following one failure
 
-A Worker continuously looks for work.
-
-Conceptually:
+### A handler throws
 
 ```text
-STARTING
-    │
-    ▼
-IDLE
-    │
-    │ Job available
-    ▼
-RESERVING
-    │
-    ▼
-PROCESSING
-    │
-    ├───────────────┐
-    │               │
-    ▼               ▼
-SUCCESS          FAILURE
-    │               │
-    ▼               ▼
-IDLE           RETRYING
-                    │
-                    ▼
-                   IDLE
+handler throws                     in the worker
+   └─ JobResult::failure($e)        class + message, not the object
+        └─ over the socket
+             └─ applyResult()
+                  └─ handleFailure()
+                       ├─ attempts < maxAttempts?
+                       │    yes → RetryPolicy::nextDelay()
+                       │          markRetry(now + delay)     READY, future
+                       │          Queue::push()  →  the delayed heap
+                       │          metrics: retried++
+                       │    no  → markFailed()               FAILED
+                       │          DeadLetterQueue::add()
+                       │          metrics: failed++, dlq++
 ```
 
-The Worker loop:
+Note where the retry ends up: the **delayed heap**, because a READY job with
+a future `availableAt` is exactly what a backoff is. There is no separate
+retry queue.
+
+### A worker is killed while busy
 
 ```text
-while (running) {
+kill -9 <worker pid>
+   │
+   ├─ the socket's peer is gone → our end reaches EOF
+   │
+   └─ Worker::collect()
+        ├─ readFrame() → null
+        ├─ apply('die')                     any state → DEAD
+        └─ WorkerOutcome($job, result: null)
+             │
+             └─ applyResult()
+                  ├─ result === null
+                  ├─ markRetry(now)          READY, available immediately
+                  ├─ Queue::push()
+                  └─ WorkerPool::replaceDeadWorkers()
+                       ├─ fork a replacement in the same slot
+                       └─ metrics: worker_crashes++
+```
 
-    job = queue.reserve()
+The job does **not** wait for the visibility timeout here — the crash was
+detected directly, so it is requeued at once. The timeout is the fallback
+for deaths nothing observed.
 
-    if no job:
-        wait
+### A worker is killed while idle
 
-    process(job)
+```text
+kill -9 <idle worker pid>
+   │
+   (nothing notices: nothing is selecting on that socket)
+   │
+   └─ next tick: WorkerPool::maintain()
+        ├─ Worker::reap()  →  waitpid(WNOHANG) returns the pid
+        ├─ apply('die')                     IDLE → DEAD
+        └─ replaceDeadWorkers()             capacity restored
+```
+
+And the race that cannot be closed — killed after the reap, before the
+write:
+
+```text
+Worker::assign()
+   ├─ writeAll() fails (EPIPE)
+   ├─ apply('die')
+   └─ throw WorkerDiedException
+        └─ JobDispatcher::dispatch() catches
+             ├─ VisibilityMonitor::release()
+             ├─ markRetry(now)  →  Queue::push()
+             └─ maintain()      →  replacement forked
+```
+
+The attempt that delivery consumed is not refunded. An attempt is a
+delivery; the visibility timeout uses the same accounting.
+
+### A handler outlives the visibility timeout
+
+The scenario people do not expect, because nothing is broken:
+
+```text
+t=0    dispatch          PROCESSING, deadline t=30, worker A starts
+t=30   requeueExpired()  deadline passed → markRetry() → READY
+                         (worker A is still running the handler)
+t=31   dispatch          PROCESSING again, attempts 2, worker B starts
+t=45   worker A answers  applyResult(): job is PROCESSING but this answer
+                         belongs to the FIRST delivery… and the state check
+                         cannot tell them apart, so:
+t=60   worker B answers  COMPLETED
+       worker A's answer  → job is no longer PROCESSING → stale ACK
+```
+
+The important detail is what `applyResult()` does **not** do with a stale
+answer: it does not release the visibility monitor. What the monitor tracks
+under that job's id by then is the *live* delivery, and releasing it there
+would leave the live one untracked — turning a harmless duplicate into a
+genuinely lost job.
+
+*Held by:* `ChaosTest::testAHandlerSlowerThanTheVisibilityTimeoutRunsTwice`,
+which asserts two runs, two different pids, and one stale ACK.
+
+### The runtime itself dies
+
+```text
+kill -9 <runtime pid>
+   │
+   ├─ every worker's socket closes → the workers exit on EOF
+   └─ nothing is applied, nothing is written
+        │
+        restart:
+        └─ InMemoryQueue::restoreFromStorage()
+             ├─ replay the log, last write per job id wins
+             ├─ tolerate a torn final line (that write was the crash)
+             ├─ PROCESSING  →  markRetry(now)  →  READY
+             ├─ READY / DELAYED  →  as they were
+             └─ COMPLETED / FAILED  →  not restored
+```
+
+Which is the at-least-once bargain at the persistence layer: a job that was
+in a worker's hands runs again, side effect and all, so handlers must be
+idempotent.
+
+---
+
+## The IPC protocol
+
+One `stream_socket_pair(AF_UNIX, SOCK_STREAM)` per worker, created before
+the fork. The parent closes the child's end, the child closes the parent's
+end **and every other worker's** — a socket kept open by a third process
+never reaches EOF at the far end, which would break crash detection for
+every worker forked before it.
+
+Frame format, both directions:
+
+```text
+ 0        4                        4+N
+ ├────────┼─────────────────────────┤
+ │ length │ JSON payload            │
+ │ uint32 │ N bytes                 │
+ │  BE    │                         │
+ └────────┴─────────────────────────┘
+```
+
+| direction | payload |
+|---|---|
+| parent → worker | `Job::toArray()` — id, type, payload, state, attempts, maxAttempts, createdAt, availableAt, priority, idempotencyKey |
+| worker → parent | `{success: bool, exceptionClass: ?string, exceptionMessage: ?string}` |
+
+`writeAll()` loops until every byte is out; `readExact()` loops until
+exactly N bytes are in, and returns `false` on EOF. That `false` is the
+crash signal — `readFrame()` turns it into `null`, and `collect()` turns
+that into an outcome with a null result.
+
+Three consequences worth stating:
+
+* **Partial delivery is impossible to mistake for a message.** Without the
+  length prefix, a stream socket delivering half a payload looks like a
+  short message.
+* **A frame can be any size.** No line-based escaping, no maximum.
+* **This is trusted local IPC.** A parent and its own children; payloads are
+  not validated as hostile input. A queue that accepted jobs over a network
+  would need to.
+
+The child also resets `SIGTERM` and `SIGINT` to `SIG_DFL` immediately after
+the fork. A fork inherits its parent's handlers, and the parent here is the
+runtime — without the reset, a SIGTERM to the process group would run a
+runtime shutdown inside every worker.
+
+---
+
+## The loop, in detail
+
+`QueueRuntime::tick()`:
+
+```php
+$dispatched = $this->dispatcher->dispatchPending();
+
+$wait = $this->waitTime();                     // see below
+
+if ($this->dispatcher->hasWorkInFlight()) {
+    $this->dispatcher->collect($wait);         // stream_select does the waiting
+} else {
+    $this->dispatcher->collect();              // nothing to select on
+    $this->sleep($wait);
 }
+
+$this->dispatcher->requeueExpired();
 ```
 
----
+`waitTime()` is `min($maxWait, nextDeadline - now)`, and `nextDeadline()` is
+the earlier of:
 
-# Job Processing Flow
+* the delayed heap's root — O(1), no scan;
+* the earliest visibility deadline — a linear scan, but over a set bounded
+  by the pool size, not the queue depth.
 
-When a Worker receives a Job:
+The cap (`$maxWait`, 50ms) is what bounds the delay between a SIGTERM
+arriving and the shutdown starting. It is also what lets a queue that
+receives work from another process be noticed at all.
+
+`WorkerPool::poll($timeout)` returns null immediately when no worker is
+working, whatever the timeout says — there is nothing that could arrive, so
+waiting would be a deadlock for `null` and a wasted sleep otherwise. That is
+why the runtime asks `hasWorkInFlight()` first and does its own sleeping in
+the other branch.
+
+### Shutdown, step by step
 
 ```text
-Worker
-
-↓
-
-Reserve Job
-
-↓
-
-Job Processor
-
-↓
-
-Resolve Handler
-
-↓
-
-Execute Handler
-
-↓
-
-Success / Failure
-```
-
-Detailed lifecycle:
-
-```text
-1. Worker asks Queue for Job
-        │
-        ▼
-2. Queue reserves Job
-        │
-        ▼
-3. Worker receives Job
-        │
-        ▼
-4. Job Processor resolves Handler
-        │
-        ▼
-5. Handler executes
-        │
-        ▼
-6. Result is evaluated
-        │
-        ├── Success
-        │
-        └── Failure
-```
-
----
-
-# Reservation
-
-A Worker should not simply:
-
-```text
-GET JOB
-
-↓
-
-PROCESS JOB
-
-↓
-
-DELETE JOB
-```
-
-That creates problems.
-
-Imagine:
-
-```text
-Worker
-
-↓
-
-Gets Job
-
-↓
-
-Starts Processing
-
-↓
-
-CRASH 💀
-```
-
-What happens to the job?
-
-If the job was already removed:
-
-```text
-Job
-
-↓
-
-Lost 💀
-```
-
-Instead:
-
-```text
-PENDING
-
-↓
-
-RESERVED
-
-↓
-
-PROCESSING
-
-↓
-
-ACKNOWLEDGED
-```
-
-The job is only considered complete after successful processing.
-
----
-
-# Visibility Timeout
-
-Reservation can have a timeout.
-
-Example:
-
-```text
-Worker A
-
-↓
-
-Reserve Job
-
-↓
-
-Visibility Timeout = 30 seconds
-```
-
-The job becomes invisible to other Workers:
-
-```text
-PENDING
-
-↓
-
-RESERVED
-
-↓
-
-Invisible for 30 seconds
-```
-
-If the Worker successfully finishes:
-
-```text
-ACK
-
-↓
-
-COMPLETED
-```
-
-But if:
-
-```text
-Worker crashes
-```
-
-and no acknowledgement arrives:
-
-```text
-Visibility Timeout expires
-
-↓
-
-Job returns to Queue
-```
-
-Architecture:
-
-```text
-PENDING
-    │
-    ▼
-RESERVED
-    │
-    │ ACK received
-    ├──────────────► COMPLETED
-    │
-    │ Timeout
-    ▼
-PENDING
-```
-
-This prevents jobs from being permanently lost after a Worker crash.
-
----
-
-# Job Processing
-
-A Job represents:
-
-```text
-What should be done
-```
-
-Example:
-
-```text
-SendEmailJob
-```
-
-A Handler represents:
-
-```text
-How it should be done
-```
-
-Example:
-
-```text
-SendEmailHandler
-```
-
-Architecture:
-
-```text
-SendEmailJob
-
-↓
-
-Handler Resolver
-
-↓
-
-SendEmailHandler
-
-↓
-
-execute()
-```
-
-This separation allows the queue infrastructure to remain independent from business logic.
-
----
-
-# Success Flow
-
-A successful job:
-
-```text
-PENDING
-    │
-    ▼
-RESERVED
-    │
-    ▼
-RUNNING
-    │
-    ▼
-SUCCESS
-    │
-    ▼
-ACKNOWLEDGED
-    │
-    ▼
-COMPLETED
-```
-
-Example:
-
-```text
-Worker
-
-↓
-
-SendEmailJob
-
-↓
-
-Email Sent
-
-↓
-
-ACK
-
-↓
-
-Job Removed From Active Queue
-```
-
----
-
-# Failure Flow
-
-A failed job:
-
-```text
-PENDING
-    │
-    ▼
-RESERVED
-    │
-    ▼
-RUNNING
-    │
-    ▼
-EXCEPTION
-    │
-    ▼
-Retry Available?
-    │
-    ├── Yes
-    │      │
-    │      ▼
-    │   RETRYING
-    │      │
-    │      ▼
-    │   PENDING
-    │
-    └── No
-           │
-           ▼
-         FAILED
-```
-
----
-
-# Retries
-
-A job may fail temporarily.
-
-Example:
-
-```text
-Database unavailable
-```
-
-or:
-
-```text
-External API timeout
-```
-
-Immediately marking the job as permanently failed is often unnecessary.
-
-Instead:
-
-```text
-Attempt 1
-
-↓
-
-Failure
-
-↓
-
-Retry
-```
-
-Example:
-
-```text
-Attempt 1
-
-↓
-
-Failure
-
-↓
-
-Wait 1 second
-
-↓
-
-Attempt 2
-
-↓
-
-Failure
-
-↓
-
-Wait 5 seconds
-
-↓
-
-Attempt 3
-```
-
-This introduces:
-
-```text
-Retry Policy
-```
-
-A retry policy can define:
-
-```text
-Maximum Attempts
-
-Retry Delay
-
-Backoff Strategy
-```
-
----
-
-# Retry Lifecycle
-
-```text
-RUNNING
-    │
-    ▼
-FAILED ATTEMPT
-    │
-    ▼
-Attempts Remaining?
-    │
-    ├── Yes
-    │
-    │     ▼
-    │   DELAYED
-    │
-    │     ▼
-    │   PENDING
-    │
-    └── No
-          │
-          ▼
-        FAILED
-```
-
-The important distinction:
-
-```text
-Failed Attempt
-
-≠
-
-Failed Job
-```
-
-A job can fail multiple times before becoming permanently failed.
-
----
-
-# Delayed Jobs
-
-Some jobs should not execute immediately.
-
-Example:
-
-```text
-Send email in 1 hour
-```
-
-The Job is placed into:
-
-```text
-DELAYED
-```
-
-instead of:
-
-```text
-PENDING
-```
-
-Architecture:
-
-```text
-DISPATCH
-
-↓
-
-DELAYED
-
-↓
-
-Scheduled Time Reached?
-
-↓
-
-PENDING
-
-↓
-
-Worker
-```
-
-Example:
-
-```php
-$queue->dispatch(
-    new SendEmailJob(...),
-    delay: 3600,
-);
-```
-
-The system periodically checks:
-
-```text
-Delayed Jobs
-
-↓
-
-Ready Jobs
-
-↓
-
-Move To Pending Queue
-```
-
----
-
-# Failed Jobs
-
-When retries are exhausted:
-
-```text
-Job
-
-↓
-
-FAILED
-```
-
-The failed job should remain inspectable.
-
-Example information:
-
-```text
-Job ID
-
-Job Type
-
-Payload
-
-Attempts
-
-Exception
-
-Failed At
-```
-
-Conceptually:
-
-```text
-Failed Jobs
-
-├── Job #101
-│
-├── Job #102
-│
-└── Job #103
-```
-
-This allows experiments with:
-
-```text
-Inspect Failed Job
-
-↓
-
-Fix Problem
-
-↓
-
-Retry Manually
-```
-
----
-
-# Worker Crash
-
-One of the most important scenarios.
-
-Imagine:
-
-```text
-Worker A
-
-↓
-
-Reserve Job
-
-↓
-
-Start Processing
-
-↓
-
-CRASH 💀
-```
-
-The system must avoid:
-
-```text
-Job Lost Forever
-```
-
-The lifecycle should be:
-
-```text
-PENDING
-
-↓
-
-RESERVED
-
-↓
-
-Worker Crash
-
-↓
-
-Visibility Timeout
-
-↓
-
-Reservation Expires
-
-↓
-
-PENDING Again
-```
-
-This creates a basic:
-
-> **At-least-once delivery model.**
-
-Important consequence:
-
-```text
-A Job Can Execute More Than Once
-```
-
-Therefore:
-
-> Job handlers should ideally be idempotent.
-
----
-
-# Idempotency
-
-Because Workers can crash:
-
-```text
-Process Job
-
-↓
-
-Action Completed
-
-↓
-
-Worker crashes before ACK
-```
-
-The Queue may retry the job.
-
-```text
-Same Job
-
-↓
-
-Executed Again
-```
-
-Therefore:
-
-```text
-Job
-
-↓
-
-Possible Duplicate Execution
-```
-
-Example:
-
-```text
-Charge Credit Card
-
-❌ Dangerous without protection
-```
-
-Better:
-
-```text
-Process Order #123
-
-↓
-
-Check if already processed
-
-↓
-
-Execute only once logically
-```
-
-The Queue can provide:
-
-```text
-At-Least-Once Delivery
-```
-
-But exactly-once processing is a much harder distributed systems problem.
-
----
-
-# Concurrency
-
-Multiple Workers can process jobs simultaneously.
-
-```text
-                    Queue
-                      │
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-     Worker A      Worker B      Worker C
-        │             │             │
-        ▼             ▼             ▼
-      Job 1         Job 2         Job 3
-```
-
-The important rule:
-
-```text
-One Job
-
-↓
-
-Must not be reserved
-
-by
-
-Two Workers
-```
-
-Therefore reservation must be atomic.
-
-Conceptually:
-
-```text
-reserve()
-
-=
-
-Take Next Available Job
-
-+
-
-Mark Reserved
-
-atomically
-```
-
----
-
-# Main Event Loop
-
-The whole system is one event loop driven by `stream_select` — no busy polling:
-
-```text
-while accepting:
-
-  dispatch:
-    for each available worker:
-      pop next job (priority, then FIFO, promote delayed)
-      → mark processing, track visibility deadline, assign to worker
-
-  poll:
-    stream_select on busy worker sockets (blocks until a result is ready)
-
-  on result:
-    success
-      → mark completed + persist
-    failure
-      → retry policy (attempts left? delay + push : DLQ)
-    crash (worker died mid-job)
-      → mark retry + push, replace dead worker (worker_crashes += 1)
-
-  recovery (periodic or on timeout):
-    requeueExpired()
-      → jobs past their visibility deadline are pushed back to the queue
-
-  on shutdown:
-    stop accepting
-    → drain pool
-    → wait until busyCount() == 0
-    → terminate workers
-```
-
-The interesting part: because the loop is blocking on worker sockets instead
-of sleeping, both dispatch and crash recovery react instantly to whatever
-actually happens.
-
----
-
-# Failure Matrix
-
-A crash at a different point produces a different guarantee. This is the model
-the whole repository is built on:
-
-| Crash point                        | Expected behavior                                              |
-|------------------------------------|----------------------------------------------------------------|
-| before reservation                 | job remains PENDING, nothing changes                           |
-| after reservation, before dispatch | job becomes visible again (visibility timeout re-queues it)    |
-| during execution                   | worker dies → job returns to queue and is retried              |
-| after business side effect, before ACK | duplicate execution is possible (at-least-once semantics)  |
-| after ACK                          | no retry — job is COMPLETED                                    |
-| during persistence                 | recovery required; last written state wins                     |
-| after idempotency claim            | depends on ordering of claim vs. side effect                   |
-
-The interesting boundary is *"side effect written, ACK not yet sent"*. That gap
-is where at-least-once delivery turns into duplicate execution, and why
-handlers must be idempotent.
-
----
-
-# Worker IPC Protocol
-
-Worker and parent communicate over a UNIX socket pair created by
-`stream_socket_pair()`. The framing is length-prefixed, not newline-delimited:
-
-```text
-[ 4-byte big-endian length ][ JSON payload ]
-```
-
-* Parent → worker: payload is the serialized Job.
-* Worker → parent: payload is the result (`success`, `exceptionClass`, `exceptionMessage`).
-
-Writes are buffered-safe (`writeAll` — loop until every byte is written) and
-reads are exact (`readExact` — loop until N bytes are read). A premature EOF on
-the parent side of the socket means the worker died; the dispatcher treats it
-as a crash and re-queues the job.
-
-Because framing is length-prefixed, messages can be arbitrarily large and the
-protocol is robust against partial reads/writes. The socket is trusted local
-IPC between a parent process and its own forked children — messages are not
-validated as hostile input.
-
----
-
-# Graceful Shutdown
-
-A Worker should not simply die immediately.
-
-Bad:
-
-```text
-PROCESSING
-
-↓
-
 SIGTERM
-
-↓
-
-Worker Dies 💀
+   ├─ handler: $stopping = true          and nothing else
+   │
+   └─ the loop exits after the current tick
+        └─ JobDispatcher::shutdown($grace)
+             ├─ accepting = false         dispatchPending() now returns 0
+             ├─ WorkerPool::drain()
+             │    ├─ IDLE workers    → apply('drain') → STOPPING, socket closed
+             │    └─ working workers → apply('drain') → DRAINING, left alone
+             │    └─ pool.draining = true   (so nothing gets replaced)
+             │
+             ├─ while busyCount() > 0 and grace remains:
+             │    └─ collect($remaining)   apply what comes back
+             │
+             └─ WorkerPool::shutdown()
+                  └─ per worker: close the socket, wait 50ms for it to
+                     exit on EOF, then SIGKILL and reap
 ```
 
-Better:
-
-```text
-PROCESSING
-
-↓
-
-SIGTERM
-
-↓
-
-DRAINING
-
-↓
-
-Finish Current Job
-
-↓
-
-STOPPED
-```
-
-Worker lifecycle:
-
-```text
-RUNNING
-    │
-    │ Shutdown Requested
-    ▼
-DRAINING
-    │
-    │ Current Job Finished
-    ▼
-STOPPED
-```
-
-While draining:
-
-```text
-Worker
-
-❌ Does Not Reserve New Jobs
-
-✅ Finishes Current Job
-```
-
-This prevents unnecessary retries during deployment or shutdown.
+The grace deadline is wall-clock (`microtime()`), not the injected `Clock`.
+Everywhere else time is injected so tests can advance it instantly; here the
+question is how long a real forked process gets to finish, and faking time
+cannot make it finish sooner.
 
 ---
 
-# Component Responsibilities
+## Ownership of a job
 
-| Component                  | Responsibility                   |
-| -------------------------- | -------------------------------- |
-| `Job`                      | Represents a unit of work        |
-| `JobDispatcher`            | Sends Jobs to the Queue          |
-| `Queue`                    | Stores and manages Job lifecycle |
-| `Worker`                   | Reserves and processes Jobs      |
-| `JobProcessor`             | Coordinates Job execution        |
-| `HandlerResolver`          | Finds the correct Handler        |
-| `JobHandler`               | Executes business logic          |
-| `RetryPolicy`              | Decides retry behavior           |
-| `DelayedJobManager`        | Moves ready Jobs to Pending      |
-| `FailedJobRepository`      | Stores failed Jobs               |
-| `ReservationManager`       | Manages Job reservation          |
-| `VisibilityTimeoutManager` | Returns abandoned Jobs           |
-| `WorkerManager`            | Manages Worker lifecycle         |
+At any instant exactly one thing is responsible for a job. This table is the
+whole design in one place.
 
----
+| job state | where it physically is | who is responsible | what moves it next |
+|---|---|---|---|
+| CREATED | nowhere yet | the producer | `push()` |
+| DELAYED | the delayed heap | `DelayedJobScheduler` | its deadline |
+| READY, available | the ready set / a lane | the queue | `pop()` |
+| READY, future `availableAt` | the delayed heap | `DelayedJobScheduler` | its deadline |
+| PROCESSING | a worker, and the in-flight set | `VisibilityMonitor` | an ACK, a NACK, or the deadline |
+| COMPLETED | nowhere | nobody — it is done | nothing |
+| FAILED | a DLQ record, if there is a DLQ | a human | `DeadLetterQueue::retry()` |
 
-# Important Invariants
-
-The system should maintain several important rules.
+Read the PROCESSING row twice. It is the only row where responsibility is
+shared with something outside the process, and it is the reason the
+visibility monitor exists.
 
 ---
 
-## A Job Must Not Be Lost
+## Component responsibilities
 
-Bad:
+| component | owns | deliberately does not know |
+|---|---|---|
+| `Job` | its own lifecycle and the legal transitions | queues, workers, retries |
+| `JobFactory` | creating jobs, counting them | where they go |
+| `Producer` | the caller-facing API | job states |
+| `Queue` | holding jobs, ready order | why a job failed |
+| `DelayedJobScheduler` | what "not yet" means, deadline order | priorities, retries as a concept |
+| `LaneSelector` | which priority gets the next turn | what a job is |
+| `Worker` | one process, the wire, running the handler | attempts, retries, the queue |
+| `WorkerPool` | N processes: which is free, which died | jobs |
+| `JobDispatcher` | what an answer means | how a worker talks, how a queue orders |
+| `VisibilityMonitor` | in-flight jobs and their deadlines | why a job is in flight |
+| `RetryPolicy` | how long to wait | whether to retry at all |
+| `DeadLetterQueue` | jobs that stopped being retried | when to stop |
+| `JobStorage` | a job's last known state, durably | job semantics |
+| `MetricsCollector` | counters and latency samples | what any of it means |
+| `QueueRuntime` | the loop and the signals | every decision inside a tick |
 
-```text
-Take Job
-
-↓
-
-Remove Job
-
-↓
-
-Worker Crash
-
-↓
-
-Job Lost 💀
-```
-
-Correct:
-
-```text
-Pending
-
-↓
-
-Reserved
-
-↓
-
-ACK
-
-↓
-
-Completed
-```
+The two that carry the most weight are `JobDispatcher` — the only thing that
+knows what an answer *means* — and `Job` itself, which is the only thing
+that can change a state.
 
 ---
 
-## Reservation Must Be Atomic
-
-Never allow:
-
-```text
-Worker A
-
-↓
-
-Sees Job
-```
-
-and simultaneously:
-
-```text
-Worker B
-
-↓
-
-Sees Same Job
-```
-
-The operation must guarantee:
-
-```text
-One Job
-
-↓
-
-One Reservation
-```
-
----
-
-## ACK Only After Success
-
-The Job should only be acknowledged after successful execution.
-
-Bad:
-
-```text
-ACK
-
-↓
-
-Process Job
-
-↓
-
-Failure 💀
-```
-
-Correct:
-
-```text
-Process Job
-
-↓
-
-Success
-
-↓
-
-ACK
-```
-
----
-
-## Workers Must Respect DRAINING
-
-When shutdown begins:
-
-```text
-DRAINING
-```
-
-means:
-
-```text
-❌ Do not reserve new Jobs
-
-✅ Finish current Job
-
-↓
-
-STOP
-```
-
----
-
-## Failed Attempt Is Not Failed Job
-
-Never confuse:
-
-```text
-Attempt Failed
-```
-
-with:
-
-```text
-Job Permanently Failed
-```
-
-A job can move:
-
-```text
-RUNNING
-
-↓
-
-FAILED ATTEMPT
-
-↓
-
-RETRYING
-
-↓
-
-RUNNING
-```
-
-multiple times.
-
----
-
-## Jobs May Execute More Than Once
-
-Because of crashes and visibility timeouts:
-
-```text
-At-Least-Once Delivery
-```
-
-means:
-
-```text
-Duplicate Execution Is Possible
-```
-
-Handlers should consider idempotency.
-
----
-
-# Typical Job Example
-
-Let's trace:
-
-```text
-SendEmailJob
-```
-
-through the complete system.
-
-```text
-1. Application creates Job
-        │
-        ▼
-2. Job Dispatcher receives Job
-        │
-        ▼
-3. Job is stored in Pending Queue
-        │
-        ▼
-4. Worker requests Job
-        │
-        ▼
-5. Queue atomically reserves Job
-        │
-        ▼
-6. Job becomes RESERVED
-        │
-        ▼
-7. Worker starts processing
-        │
-        ▼
-8. Handler is resolved
-        │
-        ▼
-9. SendEmailHandler executes
-        │
-        ▼
-10. Email is sent
-        │
-        ▼
-11. Worker ACKs Job
-        │
-        ▼
-12. Job becomes COMPLETED
-```
-
----
-
-# Failure Example
-
-Now imagine:
-
-```text
-SendEmailJob
-```
-
-fails.
-
-```text
-1. Worker reserves Job
-        │
-        ▼
-2. Worker executes Handler
-        │
-        ▼
-3. SMTP Server unavailable
-        │
-        ▼
-4. Exception
-        │
-        ▼
-5. Retry Policy checks attempts
-        │
-        ▼
-6. Attempts remaining?
-        │
-        ├── Yes
-        │
-        │     ▼
-        │   DELAYED
-        │
-        │     ▼
-        │   PENDING
-        │
-        └── No
-              │
-              ▼
-            FAILED
-```
-
----
-
-# Mental Model
-
-The complete system can be reduced to:
-
-```text
-                    PRODUCERS
-                        │
-                        ▼
-                   DISPATCH JOB
-                        │
-                        ▼
-                     QUEUE
-                        │
-                        ▼
-                    PENDING
-                        │
-                        ▼
-                   RESERVATION
-                        │
-                        ▼
-                     WORKER
-                        │
-                        ▼
-                    HANDLER
-                        │
-             ┌──────────┴──────────┐
-             ▼                     ▼
-          SUCCESS                FAILURE
-             │                     │
-             ▼                     ▼
-            ACK                 RETRY
-             │                     │
-             ▼                     ▼
-         COMPLETED          DELAYED / FAILED
-```
-
----
-
-# Project Architecture
-
-The repository can be organized like this:
-
-```text
-php-job-queue/
-│
-├── bin/
-│   ├── worker.php
-│   └── console.php
-│
-├── src/
-│   │
-│   ├── Job/
-│   │   ├── Job.php
-│   │   ├── JobId.php
-│   │   ├── JobPayload.php
-│   │   └── JobState.php
-│   │
-│   ├── Queue/
-│   │   ├── Queue.php
-│   │   ├── InMemoryQueue.php
-│   │   ├── JobReservation.php
-│   │   └── QueueStats.php
-│   │
-│   ├── Worker/
-│   │   ├── Worker.php
-│   │   ├── WorkerState.php
-│   │   ├── WorkerRunner.php
-│   │   └── WorkerConfig.php
-│   │
-│   ├── Processing/
-│   │   ├── JobProcessor.php
-│   │   ├── HandlerResolver.php
-│   │   └── JobHandler.php
-│   │
-│   ├── Retry/
-│   │   ├── RetryPolicy.php
-│   │   └── BackoffStrategy.php
-│   │
-│   ├── Delay/
-│   │   └── DelayedJobManager.php
-│   │
-│   ├── Failure/
-│   │   └── FailedJobRepository.php
-│   │
-│   └── Support/
-│       └── Clock.php
-│
-├── tests/
-│
-├── examples/
-│
-├── benchmarks/
-│
-├── docs/
-│   └── ARCHITECTURE.md
-│
-├── README.md
-├── PLAN.md
-├── composer.json
-└── phpunit.xml
-```
-
----
-
-# Final Architecture Principle
-
-The project should remain an:
-
-> **Executable mental model of a background job processing system.**
-
-You should be able to open the repository and quickly answer:
-
-```text
-How does a Job enter the system?
-```
-
-→ `JobDispatcher`
-
-```text
-Where does a Job wait?
-```
-
-→ `Queue`
-
-```text
-How does a Worker get a Job?
-```
-
-→ `reserve()`
-
-```text
-What happens during processing?
-```
-
-→ `JobProcessor`
-
-```text
-How is business logic executed?
-```
-
-→ `JobHandler`
-
-```text
-What happens when processing fails?
-```
-
-→ `RetryPolicy`
-
-```text
-What happens when retries are exhausted?
-```
-
-→ `FailedJobRepository`
-
-```text
-What happens when a Worker crashes?
-```
-
-→ `Reservation + Visibility Timeout`
-
-```text
-How does graceful shutdown work?
-```
-
-→ `WorkerState::DRAINING`
-
----
-
-# Summary
-
-```text
-PHP Job Queue
-
-=
-
-Jobs
-+
-Queue
-+
-Workers
-+
-Reservation
-+
-Handlers
-+
-Retries
-+
-Delayed Jobs
-+
-Visibility Timeout
-+
-Failed Jobs
-+
-Graceful Shutdown
-```
-
-The project is not intended to replace a production queue system.
-
-Its purpose is simpler:
-
-> **Build a small system that exposes the important engineering ideas behind background job processing.**
-
-> **Small enough to understand.**
-
-> **Real enough to experiment with.**
-
-> **Simple enough to modify.**
-
-> **Complex enough to demonstrate real failure scenarios.**
+## Where each mechanism is tested
+
+| mechanism | tests |
+|---|---|
+| Job state machine | [`tests/Job/JobTest.php`](../tests/Job/JobTest.php) |
+| FIFO, size, delayed promotion | [`tests/Queue/InMemoryQueueTest.php`](../tests/Queue/InMemoryQueueTest.php) |
+| Delayed ordering, ties, O(1) deadline | [`tests/Scheduler/DelayedJobSchedulerTest.php`](../tests/Scheduler/DelayedJobSchedulerTest.php) |
+| Priority, starvation, fair scheduling | [`tests/Queue/PriorityQueueTest.php`](../tests/Queue/PriorityQueueTest.php), [`LaneSelectorTest.php`](../tests/Queue/LaneSelectorTest.php) |
+| Producer API | [`tests/Producer/`](../tests/Producer/) |
+| Fork, wire, crash detection, reaping | [`tests/Worker/WorkerTest.php`](../tests/Worker/WorkerTest.php) |
+| Pool capacity, replacement, draining | [`tests/Worker/WorkerPoolTest.php`](../tests/Worker/WorkerPoolTest.php) |
+| ACK/NACK, retries, DLQ, metrics, restart | [`tests/Dispatcher/JobDispatcherTest.php`](../tests/Dispatcher/JobDispatcherTest.php) |
+| Visibility timeout | [`tests/Timeout/VisibilityMonitorTest.php`](../tests/Timeout/VisibilityMonitorTest.php) |
+| Dead letter records and manual retry | [`tests/DLQ/DeadLetterQueueTest.php`](../tests/DLQ/DeadLetterQueueTest.php) |
+| Append-only log, torn final record | [`tests/Persistence/FileStorageTest.php`](../tests/Persistence/FileStorageTest.php) |
+| Idempotency across redelivery and restart | [`tests/Job/IdempotencyTest.php`](../tests/Job/IdempotencyTest.php) |
+| Runtime loop, real SIGTERM, grace period | [`tests/Master/QueueRuntimeTest.php`](../tests/Master/QueueRuntimeTest.php) |
+| Crashes, duplicates, slow handlers, restart | [`tests/Chaos/ChaosTest.php`](../tests/Chaos/ChaosTest.php) |
+| 1,000 and 10,000 jobs | [`tests/Stress/StressTest.php`](../tests/Stress/StressTest.php) |
+
+Design decisions, the alternatives that were rejected, and the bugs that
+changed the code: [DECISIONS.md](DECISIONS.md).

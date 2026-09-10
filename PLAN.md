@@ -1,4 +1,22 @@
-# PHP Job Queue
+# PHP Job Queue — the plan it was built from
+
+> **Status: all 16 phases are done.** 210 tests, PHPStan level 8 clean.
+>
+> This file is kept as the record of what was built, in what order, and what
+> each step was for - not as work outstanding. Every `[x]` names a test that
+> holds that line; the tests themselves are indexed in
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#where-each-mechanism-is-tested).
+>
+> Where a phase was implemented differently from how it is described below -
+> or where building it changed the design - there is an **Implementation**
+> section saying so. The reasoning behind those choices, the alternatives
+> that were rejected, and the six bugs that building this found are in
+> [docs/DECISIONS.md](docs/DECISIONS.md).
+>
+> Start at [the README](README.md) if you want the finished system rather
+> than the plan for it.
+
+---
 
 > Educational implementation of a reliable asynchronous job processing system in PHP.
 
@@ -428,6 +446,24 @@ The structure should grow gradually.
 Do not create all classes immediately.
 
 Each phase should introduce only the abstractions that are necessary.
+
+> **What it actually became.** Close to the above, with four differences,
+> all of them the rule in that last line being followed:
+>
+> * `Queue/` has no `ReadyQueue`, `DelayedQueue` or `ProcessingQueue`. The
+>   ready set is an array inside each queue, delayed jobs are
+>   `Scheduler/DelayedJobScheduler`, and the in-flight set belongs to
+>   `Timeout/VisibilityMonitor` - which needs the deadlines anyway, so a
+>   separate holder of the same jobs would have been a second source of
+>   truth.
+> * `Handler/JobHandler` and `HandlerRegistry` do not exist. A handler is a
+>   `Closure` per pool and a `match` on the job type, which keeps handlers
+>   from having to know a queue exists.
+> * `Job/JobPayload` does not exist; a payload is an array.
+> * `Queue/` gained `LaneSelector` with two implementations, because
+>   Phase 13's starvation problem needed an answer and not just a warning.
+>
+> The current layout is in [the README](README.md#project-layout).
 
 ---
 

@@ -1,1480 +1,967 @@
 # PHP Job Queue
 
-> An educational implementation of a background job queue in PHP.
+> A reliable asynchronous job queue, built small enough to read.
 
-`php-job-queue` is a small educational project for exploring how background job processing systems work internally.
+This repository answers one question by building the answer:
 
-The goal is not to replace production-ready solutions such as:
+> **How does a reliable job queue actually work inside?**
 
-* RabbitMQ;
-* Redis-based queues;
-* Symfony Messenger;
-* Laravel Queues;
-* Temporal.
+It is not a replacement for RabbitMQ, Redis, Kafka, Symfony Messenger,
+Laravel Queue or Sidekiq. It is the mechanism those things contain, with
+nothing else in the way: 37 classes, no dependencies beyond a UUID library,
+and every reliability feature written out where you can put a breakpoint in
+it.
 
-The goal is to build a system that is:
+The workflow it is built for:
 
-* small enough to understand;
-* simple enough to modify;
-* realistic enough to demonstrate real engineering problems;
-* easy to run locally and experiment with.
+```text
+Read  →  Run  →  Experiment  →  Break something  →  Observe  →  Understand
+```
 
-This repository is designed as an **executable mental model of a background job processing system**.
+---
 
 ## Status
 
-All 16 phases from [PLAN.md](PLAN.md) are implemented:
+All 16 phases of [PLAN.md](PLAN.md) are done, 210 tests, PHPStan level 8
+clean.
 
-`Job model` · `FIFO / delayed / priority queues` · `Producer` · `Worker pool` · `Dispatcher` · `ACK / NACK` · `Retry (fixed & exponential backoff)` · `Visibility timeout` · `Dead Letter Queue` · `Worker crash recovery` · `Persistence (append-only log)` · `Metrics` · `Graceful shutdown` · `Stress & chaos tests`
-
-```bash
-make install        # composer install
-make test           # PHPUnit
-make analyse        # PHPStan (level 8)
-make docker-run     # demo via Docker
-```
-
-Run the demo directly:
+`Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
+`Forked worker pool` · `Dispatcher` · `ACK / NACK` · `Fixed and exponential
+retry` · `Visibility timeout` · `Dead letter queue` · `Worker crash
+recovery` · `Append-only persistence` · `Fair scheduling` · `Metrics` ·
+`Graceful shutdown` · `Stress and chaos tests`
 
 ```bash
-docker compose exec php php bin/run.php
+make build              # docker image
+make docker-install     # composer install
+make docker-test        # 210 tests
+make docker-analyse     # phpstan, level 8
+make docker-lint        # php-cs-fixer, check only
+
+make docker-run                              # the lifecycle once
+make docker-run-worker                       # the long-running process
+make docker-example EXAMPLE=worker-crash     # one mechanism at a time
+make docker-bench ARGS="10000 8"             # throughput and latency
 ```
+
+Every target has a non-Docker twin (`make test`, `make run`, …) if you have
+PHP 8.5 with `pcntl` and `posix` locally.
 
 ---
 
-## Why?
+## Table of contents
 
-Modern applications often need to perform work asynchronously.
+1. [The shape of it](#the-shape-of-it)
+2. [A job's life](#a-jobs-life)
+3. [Producing work](#producing-work)
+4. [Queues](#queues)
+5. [Workers are processes](#workers-are-processes)
+6. [The dispatcher](#the-dispatcher)
+7. [ACK and NACK](#ack-and-nack)
+8. [Retries](#retries)
+9. [Delayed jobs](#delayed-jobs)
+10. [Visibility timeout](#visibility-timeout)
+11. [Dead letter queue](#dead-letter-queue)
+12. [Worker crashes](#worker-crashes)
+13. [Persistence](#persistence)
+14. [Priority and starvation](#priority-and-starvation)
+15. [Metrics](#metrics)
+16. [Graceful shutdown](#graceful-shutdown)
+17. [The runtime](#the-runtime)
+18. [At-least-once, and what it costs you](#at-least-once-and-what-it-costs-you)
+19. [Experiments](#experiments)
+20. [Failure matrix](#failure-matrix)
+21. [Performance](#performance)
+22. [Project layout](#project-layout)
+23. [Engineering questions, answered](#engineering-questions-answered)
+24. [What this is not](#what-this-is-not)
+25. [Related projects](#related-projects)
 
-For example:
+---
 
-```text
-HTTP Request
-
-↓
-
-Send Email
-
-↓
-
-Generate PDF
-
-↓
-
-Resize Image
-
-↓
-
-Call External API
-
-↓
-
-Process Data
-
-↓
-
-Return Response
-```
-
-Doing all this work inside an HTTP request can make the application slow.
-
-Instead:
+## The shape of it
 
 ```text
-HTTP Request
-
-↓
-
-Create Job
-
-↓
-
-Push Job To Queue
-
-↓
-
-Return Response
+        ┌──────────────┐
+        │   Producer   │   creates jobs
+        └───────┬──────┘
+                ▼
+        ┌──────────────┐        ┌───────────────────────┐
+        │    Queue     │◄───────│ DelayedJobScheduler   │  min-heap of
+        │  ready jobs  │        │ (delays and backoff)  │  deadlines
+        └───────┬──────┘        └───────────────────────┘
+                ▼
+        ┌──────────────┐        ┌───────────────────────┐
+        │  Dispatcher  │───────►│  VisibilityMonitor    │  in-flight jobs
+        └───────┬──────┘        │  and their deadlines  │  and their ACK
+                │               └───────────────────────┘  deadlines
+    ┌───────────┼───────────┐
+    ▼           ▼           ▼
+ Worker      Worker      Worker      each a forked process
+    │           │           │
+    ▼           ▼           ▼
+ Handler     Handler     Handler
+    │
+    ├──── ACK ─────► COMPLETED
+    │
+    └──── NACK ────► attempts left?  ──yes──►  READY (after backoff)
+                            │
+                            no
+                            ▼
+                     ┌──────────────┐
+                     │ Dead Letter  │
+                     └──────────────┘
 ```
 
-Later:
+Everything above the workers runs in one process, driven by
+[`QueueRuntime`](src/Master/QueueRuntime.php). Everything below the
+dispatcher is a separate OS process, which is the point: a handler that
+segfaults, blocks forever, or is `kill -9`'d takes its process down and
+nothing else — and what happens to its **job** then is the interesting
+question.
+
+---
+
+## A job's life
 
 ```text
-Worker
-
-↓
-
-Take Job
-
-↓
-
-Process Job
+                 ┌─────────┐
+                 │ CREATED │
+                 └────┬────┘
+      markDelayed()   │   markReady()
+                 ┌────▼──┐│
+                 │DELAYED││
+                 └────┬──┘│
+                      └───┤ deadline passes
+                     ┌────▼───┐
+             ┌──────►│ READY  │◄──────────────┐
+             │       └────┬───┘               │ markRequeued()
+             │            │ markProcessing()  │ (a human retries
+             │       ┌────▼───────┐           │  a DLQ record)
+             │       │ PROCESSING │           │
+             │       └──┬──┬───┬──┘           │
+  markRetry()│          │  │   │              │
+  (NACK with └──────────┘  │   └──────────────┼──┐
+   attempts left, or       │ markCompleted()  │  │ markFailed()
+   an expired          ┌───▼──────┐       ┌───┴──▼─┐
+   visibility          │COMPLETED │       │ FAILED │
+   timeout)            └──────────┘       └────────┘
 ```
 
-This project explores what actually happens between:
+The states are a real state machine, not a label: every transition goes
+through one table in [`Job`](src/Job/Job.php), and anything not in it
+throws. There is no path by which a COMPLETED job quietly becomes
+PROCESSING again.
+
+Two arrows into READY look like one and are not:
+
+| | from | when |
+|---|---|---|
+| `markRetry()` | PROCESSING | a NACK with attempts left, or an expired visibility timeout |
+| `markRequeued()` | FAILED | a human retried a dead-letter record |
+
+**Attempts count deliveries, not runs.** `markProcessing()` is what
+increments the counter, so a job handed to a worker that died before
+starting has still used an attempt. That is the honest accounting for an
+at-least-once system, and what real queues count too.
+
+---
+
+## Producing work
 
 ```php
-dispatch($job);
-```
+$producer = new Producer($queue, new JobFactory($clock, $metrics));
 
-and:
-
-```text
-Job Completed
-```
-
----
-
-# Core Idea
-
-A Job Queue separates:
-
-```text
-Producing Work
-```
-
-from:
-
-```text
-Processing Work
-```
-
-The Producer creates work:
-
-```text
-Application
-
-↓
-
-Create Job
-
-↓
-
-Queue
-```
-
-Workers process work:
-
-```text
-Queue
-
-↓
-
-Worker
-
-↓
-
-Job Handler
-
-↓
-
-Result
-```
-
-The Queue connects them.
-
-> **Producers create work. Workers process work. The Queue connects them.**
-
----
-
-# Architecture
-
-```text
-                    PRODUCERS
-                        │
-                        │ dispatch()
-                        ▼
-                 ┌──────────────┐
-                 │    QUEUE     │
-                 └──────┬───────┘
-                        │
-          ┌─────────────┼─────────────┐
-          ▼             ▼             ▼
-       Worker A      Worker B      Worker C
-          │             │             │
-          ▼             ▼             ▼
-        Job 1         Job 2         Job 3
-          │             │             │
-          └─────────────┼─────────────┘
-                        ▼
-                    HANDLERS
-```
-
-The system consists of several main components:
-
-```text
-┌─────────────────────────────────────┐
-│ Job Creation                        │
-│                                     │
-│ Job                                 │
-│ Dispatcher                          │
-└──────────────────┬──────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────┐
-│ Queue                               │
-│                                     │
-│ Pending Jobs                        │
-│ Reserved Jobs                       │
-│ Delayed Jobs                        │
-│ Failed Jobs                         │
-└──────────────────┬──────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────┐
-│ Worker                              │
-│                                     │
-│ Reserve Job                         │
-│ Process Job                         │
-│ ACK / Retry                         │
-└──────────────────┬──────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────┐
-│ Processing                          │
-│                                     │
-│ Job Processor                       │
-│ Handler Resolver                    │
-│ Job Handler                         │
-└─────────────────────────────────────┘
-```
-
-For a detailed explanation of the internal design, see:
-
-* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-
----
-
-# Job Lifecycle
-
-Every Job moves through a lifecycle.
-
-```text
-CREATED
-    │
-    ▼
-PENDING
-    │
-    │ Worker reserves Job
-    ▼
-RESERVED
-    │
-    ▼
-RUNNING
-    │
-    ├─────────────────┐
-    │                 │
-    ▼                 ▼
-SUCCESS             FAILURE
-    │                 │
-    ▼                 ▼
-COMPLETED          RETRYING
-                      │
-                      ▼
-                   DELAYED
-                      │
-                      ▼
-                    PENDING
-```
-
-If retries are exhausted:
-
-```text
-RUNNING
-
-↓
-
-FAILURE
-
-↓
-
-FAILED
-```
-
-Simplified:
-
-```text
-PENDING
-   │
-   ▼
-RESERVED
-   │
-   ▼
-RUNNING
-   │
-   ├── Success ──► COMPLETED
-   │
-   └── Failure ──► RETRY / FAILED
-```
-
----
-
-# Project Structure
-
-```text
-php-job-queue/
-│
-├── bin/
-│   ├── worker.php
-│   └── console.php
-│
-├── src/
-│   │
-│   ├── Job/
-│   │   ├── Job.php
-│   │   ├── JobId.php
-│   │   ├── JobPayload.php
-│   │   └── JobState.php
-│   │
-│   ├── Queue/
-│   │   ├── Queue.php
-│   │   ├── InMemoryQueue.php
-│   │   ├── JobReservation.php
-│   │   └── QueueStats.php
-│   │
-│   ├── Worker/
-│   │   ├── Worker.php
-│   │   ├── WorkerState.php
-│   │   ├── WorkerRunner.php
-│   │   └── WorkerConfig.php
-│   │
-│   ├── Processing/
-│   │   ├── JobProcessor.php
-│   │   ├── HandlerResolver.php
-│   │   └── JobHandler.php
-│   │
-│   ├── Retry/
-│   │   ├── RetryPolicy.php
-│   │   └── BackoffStrategy.php
-│   │
-│   ├── Delay/
-│   │   └── DelayedJobManager.php
-│   │
-│   ├── Failure/
-│   │   └── FailedJobRepository.php
-│   │
-│   └── Support/
-│       └── Clock.php
-│
-├── tests/
-├── examples/
-├── benchmarks/
-│
-├── docs/
-│   └── ARCHITECTURE.md
-│
-├── README.md
-├── PLAN.md
-├── composer.json
-└── phpunit.xml
-```
-
----
-
-# Basic Example
-
-Create a Job:
-
-```php
-$job = new SendEmailJob(
-    to: 'user@example.com',
-    subject: 'Hello',
-    message: 'Welcome!',
+$job = $producer->dispatch(
+    'send_email',
+    ['to' => 'user@example.com', 'subject' => 'Hello'],
 );
 ```
 
-Dispatch it:
+That is the whole caller-facing API. Application code never touches a `Job`,
+a state, or a queue implementation — the caller's side of an asynchronous
+system should be as small as the synchronous call it replaced.
+
+Everything optional is a named argument:
 
 ```php
-$queue->dispatch($job);
+$producer->dispatch(
+    'charge_card',
+    ['order_id' => 123, 'amount' => 49.90],
+    maxAttempts: 5,
+    delay: 60,                              // seconds
+    priority: JobPriority::HIGH,
+    idempotencyKey: 'charge-order-123',
+);
 ```
 
-The Job enters the Queue:
+A job's **type** is a string, and handlers are plain callables — there is no
+handler registry, no container, no class resolution. One `Closure` per pool
+receives every job:
 
-```text
-SendEmailJob
-
-↓
-
-PENDING
+```php
+$pool = new WorkerPool(4, static function (Job $job): void {
+    match ($job->getType()) {
+        'send_email' => sendEmail($job->getPayload()),
+        'charge_card' => charge($job->getPayload()),
+    };
+});
 ```
 
-A Worker later processes it:
-
-```text
-Worker
-
-↓
-
-Reserve Job
-
-↓
-
-Execute Handler
-
-↓
-
-ACK
-```
+A handler that returns normally succeeded. A handler that throws failed.
+Nothing else is required of it, and it never learns that a queue exists.
 
 ---
 
-# Queue
+## Queues
 
-The Queue stores Jobs waiting for processing.
+```php
+interface Queue
+{
+    public function push(Job $job, int $delay = 0): void;
+    public function pop(?float $now = null): ?Job;
 
-Conceptually:
-
-```text
-Queue
-
-├── Pending
-│
-├── Reserved
-│
-├── Delayed
-│
-└── Failed
-```
-
-The Queue is responsible for:
-
-```text
-Push Job
-
-Reserve Job
-
-Acknowledge Job
-
-Release Job
-
-Move Delayed Job
-
-Handle Expired Reservations
-```
-
----
-
-# Workers
-
-Workers continuously look for work.
-
-Conceptually:
-
-```text
-while (running) {
-
-    job = queue.reserve();
-
-    if no job:
-        wait;
-
-    process(job);
+    public function size(): int;          // everything waiting
+    public function readySize(): int;     // waiting and available
+    public function delayedSize(): int;   // waiting on a deadline
+    public function nextDeadline(): ?float;
 }
 ```
 
-A Worker:
+`readySize()` and `delayedSize()` are both in the contract on purpose: "40
+jobs waiting" means something very different when 39 of them are not due for
+an hour.
 
-```text
-START
+Two implementations:
 
-↓
+* [`InMemoryQueue`](src/Queue/InMemoryQueue.php) — one FIFO. Also the only
+  one that can restore itself from storage.
+* [`PriorityQueue`](src/Queue/PriorityQueue.php) — one FIFO per priority,
+  with the choice between them delegated to a
+  [`LaneSelector`](src/Queue/LaneSelector.php). See
+  [priority and starvation](#priority-and-starvation).
 
-WAIT FOR JOB
+Both hold delayed jobs in the same
+[`DelayedJobScheduler`](src/Scheduler/DelayedJobScheduler.php), and both
+make the same push decision through it — a queue's job is holding jobs, not
+deciding what "not yet" means.
 
-↓
-
-RESERVE JOB
-
-↓
-
-PROCESS JOB
-
-↓
-
-ACK / RETRY
-
-↓
-
-WAIT FOR NEXT JOB
-```
+`pop()` returning null does **not** mean the queue is empty. It means
+nothing is available; everything in it may be delayed.
 
 ---
 
-# Reservation
+## Workers are processes
 
-A Worker should not simply:
-
-```text
-GET JOB
-
-↓
-
-PROCESS JOB
-
-↓
-
-DELETE JOB
-```
-
-Imagine:
+[`Worker`](src/Worker/Worker.php) forks, and both sides of the fork live in
+that one class: the parent uses `assign()` / `collect()`, the child runs
+`workerLoop()` and exits from it. Keeping the pair together means the wire
+format is stated once.
 
 ```text
-Worker
+STARTING ──spawn──► IDLE ──assign──► BUSY ──finish──► IDLE
+                     │                 │
+                  drain│            drain│
+                     ▼                 ▼
+                 STOPPING          DRAINING ──finish──► STOPPING
+                                       (still working,
+                                        no new work)
 
-↓
-
-Gets Job
-
-↓
-
-Starts Processing
-
-↓
-
-CRASH 💀
+any state ──die──► DEAD  (terminal)
 ```
 
-If the Job was already removed:
+Two things are tracked separately, and the distinction matters:
+
+* the **state** says whether new work may be dispatched here;
+* `isWorking()` says whether work is happening right now.
+
+A worker drained mid-job is DRAINING — not available, still working — which
+is exactly what a graceful shutdown has to wait for. And DRAINING + finish
+is STOPPING rather than IDLE, so a shutdown cannot hand it one more job on
+the way out.
+
+### The wire
+
+A Unix socket pair carrying length-prefixed JSON:
 
 ```text
-Job Lost Forever 💀
+[ 4-byte big-endian length ][ JSON payload ]
 ```
 
-Instead:
+Parent → worker is the serialized job; worker → parent is
+`{success, exceptionClass, exceptionMessage}`. Writes loop until every byte
+is out, reads loop until exactly N bytes are in.
 
-```text
-PENDING
+The length prefix is not ceremony. A stream socket is free to deliver half a
+message, and "read what is available and hope" is how an IPC layer starts
+silently truncating payloads under load. With the prefix, a short read is
+either completed or an **EOF** — and an EOF mid-frame means the process
+died, which is the single most important thing a worker handle has to be
+able to tell.
 
-↓
-
-RESERVED
-
-↓
-
-PROCESSING
-
-↓
-
-ACK
-
-↓
-
-COMPLETED
-```
-
-The Job remains recoverable until successful processing is acknowledged.
+The exception itself cannot cross the socket — it may not be serializable,
+and its stack refers to a process that no longer exists — so its class and
+message do, and a stand-in is rebuilt on the other side. What survives is
+what the DLQ needs to show a human.
 
 ---
 
-# Visibility Timeout
+## The dispatcher
 
-A reservation should not live forever.
-
-Example:
-
-```text
-Worker A
-
-↓
-
-Reserve Job
-
-↓
-
-Visibility Timeout = 30 seconds
-```
-
-The Job becomes temporarily unavailable to other Workers.
-
-```text
-PENDING
-
-↓
-
-RESERVED
-
-↓
-
-Invisible To Other Workers
-```
-
-If processing succeeds:
-
-```text
-ACK
-
-↓
-
-COMPLETED
-```
-
-If the Worker crashes:
-
-```text
-Worker Crash
-
-↓
-
-No ACK
-
-↓
-
-Visibility Timeout Expires
-
-↓
-
-Job Returns To PENDING
-```
-
-Architecture:
-
-```text
-PENDING
-    │
-    ▼
-RESERVED
-    │
-    ├── ACK ─────────────► COMPLETED
-    │
-    └── Timeout ─────────► PENDING
-```
-
-This creates a basic:
-
-> **At-least-once delivery model.**
-
----
-
-# At-Least-Once Delivery
-
-The Queue attempts to ensure that a Job is eventually processed.
-
-However:
-
-```text
-Worker
-
-↓
-
-Executes Job
-
-↓
-
-Action Completed
-
-↓
-
-Worker Crashes Before ACK
-```
-
-The Queue may retry the Job.
-
-```text
-Same Job
-
-↓
-
-Executed Again
-```
-
-Therefore:
-
-> **A Job may execute more than once.**
-
----
-
-# Idempotency
-
-Because duplicate execution is possible, Job handlers should consider idempotency.
-
-Example:
-
-```text
-Process Order #123
-
-↓
-
-Check Current State
-
-↓
-
-Already Processed?
-
-├── Yes → Skip
-│
-└── No → Process
-```
-
-The goal is:
-
-```text
-Same Job Executed Multiple Times
-
-↓
-
-Same Logical Result
-```
-
----
-
-# Retries
-
-A failed attempt does not necessarily mean a permanently failed Job.
-
-Example:
-
-```text
-External API unavailable
-```
-
-The system can retry:
-
-```text
-Attempt 1
-
-↓
-
-Failure
-
-↓
-
-Retry
-```
-
-A Retry Policy can define:
-
-```text
-Maximum Attempts
-
-Retry Delay
-
-Backoff Strategy
-```
-
-Example:
-
-```text
-Attempt 1
-
-↓
-
-Failure
-
-↓
-
-Wait 1 second
-
-↓
-
-Attempt 2
-
-↓
-
-Failure
-
-↓
-
-Wait 5 seconds
-
-↓
-
-Attempt 3
-```
-
----
-
-# Retry Lifecycle
-
-```text
-RUNNING
-    │
-    ▼
-FAILED ATTEMPT
-    │
-    ▼
-Attempts Remaining?
-    │
-    ├── Yes
-    │
-    │     ▼
-    │   DELAYED
-    │
-    │     ▼
-    │   PENDING
-    │
-    └── No
-          │
-          ▼
-        FAILED
-```
-
-> **Failed Attempt ≠ Failed Job**
-
----
-
-# Delayed Jobs
-
-Not every Job should execute immediately.
-
-```text
-DISPATCH
-
-↓
-
-DELAYED
-
-↓
-
-Scheduled Time Reached
-
-↓
-
-PENDING
-
-↓
-
-Worker
-```
-
-Example:
+[`JobDispatcher`](src/Dispatcher/JobDispatcher.php) is the middle of the
+system, and everything it collaborates with is optional:
 
 ```php
-$queue->dispatch(
-    new SendEmailJob(...),
-    delay: 3600,
+$dispatcher = new JobDispatcher(
+    $queue,
+    $pool,
+    $retryPolicy,               // null → retry immediately
+    $clock,
+    visibilityTimeout: 30,      // null → in-flight jobs never expire
+    dlq: $dlq,                  // null → exhausted jobs just end FAILED
+    storage: $storage,          // null → nothing survives a restart
+    metrics: $metrics,          // null → nothing is counted
 );
 ```
 
----
+They are nullable rather than required because each one is a mechanism you
+can read on its own — and see the system work without.
 
-# Failed Jobs
-
-When retries are exhausted:
-
-```text
-RUNNING
-
-↓
-
-FAILURE
-
-↓
-
-FAILED
-```
-
-A Failed Job should remain inspectable.
-
-Example metadata:
-
-```text
-Job ID
-
-Job Type
-
-Payload
-
-Attempts
-
-Exception
-
-Failed At
-```
-
-This allows:
-
-```text
-Inspect
-
-↓
-
-Understand Failure
-
-↓
-
-Fix Problem
-
-↓
-
-Retry Manually
-```
-
----
-
-# Concurrency
-
-Multiple Workers can process Jobs simultaneously.
-
-```text
-                    Queue
-                      │
-        ┌─────────────┼─────────────┐
-        ▼             ▼             ▼
-     Worker A      Worker B      Worker C
-        │             │             │
-        ▼             ▼             ▼
-      Job 1         Job 2         Job 3
-```
-
-The important invariant:
-
-```text
-One Job
-
-↓
-
-Must not be reserved
-
-by
-
-Two Workers
-```
-
-Therefore:
-
-```text
-reserve()
-
-=
-
-Take Next Available Job
-
-+
-
-Mark As Reserved
-
-atomically
-```
-
----
-
-# Graceful Shutdown
-
-Workers should support graceful shutdown.
-
-```text
-RUNNING
-    │
-    │ Shutdown Requested
-    ▼
-DRAINING
-    │
-    │ Current Job Finished
-    ▼
-STOPPED
-```
-
-While draining:
-
-```text
-❌ Do not reserve new Jobs
-
-✅ Finish current Job
-```
-
-This is important during:
-
-* deployments;
-* restarts;
-* process shutdown.
-
----
-
-# Failure Scenarios
-
-One of the main purposes of this project is to experiment with failure.
-
-## Crash Matrix
-
-A crash at a different point produces a different guarantee. This is the model
-the whole repository is built on:
-
-| Crash point                        | Expected behavior                                              |
-|------------------------------------|----------------------------------------------------------------|
-| before reservation                 | job remains PENDING, nothing changes                           |
-| after reservation, before dispatch | job becomes visible again (visibility timeout re-queues it)    |
-| during execution                   | worker dies → job returns to queue and is retried              |
-| after business side effect, before ACK | duplicate execution is possible (at-least-once semantics)  |
-| after ACK                          | no retry — job is COMPLETED                                    |
-| during persistence                 | recovery required; last written state wins                     |
-| after idempotency claim            | depends on ordering of claim vs. side effect                   |
-
-The interesting boundary is *"side effect written, ACK not yet sent"*. That gap
-is where at-least-once delivery turns into duplicate execution, and why
-handlers must be idempotent.
-
-## Worker Crash
-
-```text
-PENDING
-
-↓
-
-RESERVED
-
-↓
-
-Worker Crash 💀
-
-↓
-
-Visibility Timeout
-
-↓
-
-PENDING Again
-```
-
-## Job Failure
-
-```text
-RUNNING
-
-↓
-
-Exception
-
-↓
-
-Retry Available?
-
-├── Yes → Retry
-│
-└── No → Failed
-```
-
-## Duplicate Execution
-
-```text
-Job Executed
-
-↓
-
-Worker Crashes Before ACK
-
-↓
-
-Job Returns To Queue
-
-↓
-
-Job Executed Again
-```
-
-## Graceful Shutdown
-
-```text
-Worker Processing Job
-
-↓
-
-SIGTERM
-
-↓
-
-DRAINING
-
-↓
-
-Finish Current Job
-
-↓
-
-STOPPED
-```
-
----
-
-# Experiments
-
-The repository is designed to be executed and modified.
-
-Recommended experiments:
-
-### Worker Crash
-
-Kill a Worker while it processes a Job:
-
-```text
-Job Processing
-
-↓
-
-kill -9 Worker
-
-↓
-
-Start New Worker
-
-↓
-
-Observe Job Recovery
-```
-
-### Retry
-
-Create a Handler that intentionally fails:
+It has two halves, deliberately apart:
 
 ```php
-throw new RuntimeException('Temporary failure');
+$dispatcher->dispatchPending();   // fill every free worker, don't wait
+$dispatcher->collect($timeout);   // apply every answer that arrived
 ```
 
-Observe:
+Keeping them separate is what lets a pool of N run N jobs at once. A loop
+that waits for each job before dispatching the next has a pool of one,
+whatever its size says. `drain()` and `QueueRuntime` are both these two
+halves in a loop; they differ only in when they decide to stop.
+
+### The invariant
+
+A job must never be *between* the queue and a worker. So `dispatch()` marks
+it PROCESSING and registers it with the visibility monitor **before** it
+writes to the socket — there is no instant at which the job is neither
+queued nor accounted for as in flight.
+
+---
+
+## ACK and NACK
+
+What the dispatcher does with an answer:
+
+| answer | meaning | result |
+|---|---|---|
+| success | ACK | COMPLETED |
+| failure, attempts left | NACK | READY, after the retry delay |
+| failure, attempts gone | NACK | FAILED, plus a DLQ record |
+| **null result** | the worker died holding the job | READY at once, worker replaced |
+| job is not PROCESSING | a late answer for a job already resolved | counted as a stale ACK, ignored |
+
+The last two rows are why a worker reports a
+[`WorkerOutcome`](src/Worker/WorkerOutcome.php) rather than a
+[`JobResult`](src/Job/JobResult.php). "The job failed" and "the worker
+vanished" need different handling, and a `JobResult` has no way to say the
+second one.
+
+The stale-ACK row is the visibility timeout showing through, and it is not
+hypothetical — see [experiments](#experiments).
+
+---
+
+## Retries
+
+```php
+interface RetryPolicy
+{
+    public function nextDelay(Job $job): int;
+}
+```
+
+* [`FixedDelayRetry`](src/Retry/FixedDelayRetry.php) — 1s, 1s, 1s. Right
+  when failures are independent, wrong when they are not: a dependency that
+  is down stays down, and a hundred jobs retrying every second are a hundred
+  requests a second against something already failing.
+* [`ExponentialBackoffRetry`](src/Retry/ExponentialBackoffRetry.php) — 1s,
+  2s, 4s, 8s. The retries stop being part of the problem.
+
+No jitter, deliberately. It would be right in production — a thousand jobs
+that failed together retry together, and the pattern repeats at every
+doubling — and it would make the delays in an example unreadable.
 
 ```text
-Attempt
-
-↓
-
-Failure
-
-↓
-
-Retry
-
-↓
-
-Backoff
-
-↓
-
-Success / Failed
+attempt 1 ❌  →  wait 1s  →  attempt 2 ❌  →  wait 2s  →  attempt 3 ❌  →  DLQ
 ```
 
-### Delayed Job
+---
 
-Dispatch:
+## Delayed jobs
+
+```php
+$producer->dispatch('reminder', [], delay: 3600);
+```
 
 ```text
-Job
-
-↓
-
-Delay 10 Seconds
-
-↓
-
-Observe
-
-↓
-
-PENDING
-
-↓
-
-Worker Processes Job
+CREATED  →  DELAYED  →  (deadline passes)  →  READY  →  …
 ```
 
-### Multiple Workers
+[`DelayedJobScheduler`](src/Scheduler/DelayedJobScheduler.php) holds them in
+a min-heap ordered by deadline. Two different things end up in it, and it
+matters that they are the same mechanism:
 
-Start:
+* a DELAYED job, dispatched with a delay;
+* a **READY job with a future `availableAt`** — which is what a retry under
+  backoff is.
+
+A retry *is* a delayed job. Backoff is not a second waiting mechanism bolted
+onto the first.
+
+The heap replaced an array re-sorted on every push. O(log n) to insert
+instead of O(n log n) — but the property that actually matters is
+`nextDeadline()` in O(1) off the root, because that is what lets the runtime
+loop **sleep until** the next deadline instead of waking up to ask whether
+it has arrived.
+
+---
+
+## Visibility timeout
+
+The problem:
 
 ```text
-Worker A
-
-Worker B
-
-Worker C
+READY  →  worker takes the job  →  PROCESSING  →  worker dies 💀
 ```
 
-Dispatch many Jobs and observe how they are distributed.
+Without protection the job is simply gone: not queued, not completed, not
+failed. So a dispatched job gets a deadline, and if no ACK arrives before
+it, the job returns to READY and goes to someone else.
 
-### Graceful Shutdown
+```php
+new JobDispatcher($queue, $pool, visibilityTimeout: 30);
+// …
+$dispatcher->requeueExpired();   // QueueRuntime calls this every tick
+```
 
-Start processing a long-running Job.
+In [`VisibilityMonitor`](src/Timeout/VisibilityMonitor.php), tracking and
+expiry are separate: every dispatched job is tracked, and a null timeout
+only means nothing can become overdue. So the "processing" gauge is honest
+either way, and whether to reclaim jobs stays a matter of configuration.
 
-Send:
+**It is not an execution timeout.** The deadline says how long a job may
+stay unacknowledged, not how long a handler may run. A handler slower than
+the timeout gets its job handed to a second worker while the first is still
+working on it — that is the timeout being too short, and it is a
+[real, tested scenario](tests/Chaos/ChaosTest.php).
+
+---
+
+## Dead letter queue
+
+Without one, a job that can never succeed has two endings and both are bad:
+retry forever, burning workers on work that will not complete, or drop it
+and lose the fact that it existed.
+
+```php
+$dlq->all();                  // every record
+$dlq->find($jobId);           // one
+$dlq->retry($jobId);          // FAILED → READY, and hand it back
+$dlq->delete($jobId);         // give up on it
+```
+
+A record keeps the job, the exception that finished it, the attempt count
+and the time — enough to answer "what broke, and how often" without going to
+the logs. The attempt count is **copied** rather than read on demand,
+because `retry()` puts the job back into circulation and the record has to
+keep saying "this failed three times" after the fourth attempt starts.
+
+---
+
+## Worker crashes
+
+A worker can die in two states, and they are detected by two different
+paths. Both are tested; the second one was a genuine hole.
+
+**Busy.** The socket reaches EOF, `collect()` reports an outcome with a null
+result, and that outcome names the job that went down with it. This path has
+to stay the one that handles a busy crash, because it is the only one that
+knows which job was lost.
+
+**Idle.** Nothing is selecting on an idle worker's socket, because nothing
+is coming. The death used to stay invisible until the pool handed it a job —
+and then the write to a dead socket threw out of the dispatch loop, taking
+the runtime down and leaving the job marked PROCESSING with no worker behind
+it. [`WorkerPool::maintain()`](src/Worker/WorkerPool.php) closes that with a
+non-blocking `waitpid` per idle worker, and the race it cannot close (killed
+after the check, before the write) is reported as `WorkerDiedException`,
+which the dispatcher answers by putting the job straight back.
+
+```text
+worker dies
+     ↓
+reap (or EOF)
+     ↓
+mark DEAD  →  fork a replacement  →  capacity restored
+     ↓
+the job it held goes back to READY  →  runs again
+```
+
+DRAINING and STOPPING workers are skipped by the reaper on purpose: those
+are leaving because we told them to, and counting a deliberate shutdown as a
+crash would make the crash counter useless.
+
+> A worker crash must not permanently lose a job. Worker lifecycle is not
+> job lifecycle.
+
+---
+
+## Persistence
+
+```php
+$storage = new FileStorage('/var/lib/jobs.log');
+// …later, in a new process:
+$queue = InMemoryQueue::restoreFromStorage($storage, $clock);
+```
+
+An append-only log, one JSON object per line, keyed by job id, last write
+wins. Append rather than rewrite because appending is the operation that is
+hard to half-finish: a crash mid-write leaves a truncated last line and
+every complete line before it intact, where rewriting a whole file can lose
+all of it.
+
+`load()` therefore **tolerates a malformed final line** — that is a write
+torn by the crash we are recovering from, and refusing to start because the
+last record is half-written would make the log useless exactly when it is
+needed. A malformed line anywhere else is corruption, and throws.
+
+On restore:
+
+| last known state | what happens |
+|---|---|
+| READY, DELAYED | restored as it was |
+| PROCESSING | back to READY — nobody is left to ACK it, so it runs again |
+| COMPLETED, FAILED | not restored; a finished job is not work |
+
+The PROCESSING row is the at-least-once bargain restated at the persistence
+layer. The cost is bounded replay: the log grows with every state change and
+`load()` replays all of it. A real system pairs this with periodic
+snapshots; this one does not, and says so.
+
+---
+
+## Priority and starvation
+
+```php
+$queue = new PriorityQueue($clock, new StrictPriority());        // default
+$queue = new PriorityQueue($clock, new WeightedRoundRobin());    // 5:3:1
+```
+
+[`StrictPriority`](src/Queue/StrictPriority.php) always takes the highest
+non-empty lane. It is the default because that is what "priority queue"
+means to most people — and because its failure is worth being able to watch
+rather than hide:
+
+```text
+strict priority                H H H H H H H H H H H H H H H H H H H H
+                               low-cleanup NEVER RAN
+
+weighted round robin (5:3:1)   H H H H H N N N L H H H H H N N N L H H
+                               low-cleanup ran
+```
+
+That is real output from `make docker-example EXAMPLE=priority-jobs`, over
+the same load: a steady stream of HIGH work, one job arriving for every job
+served, plus a backlog of NORMAL and LOW that arrived first. Under strict
+priority the backlog never moves. Not "moves late" — never. Nothing in that
+policy ever gives it a turn.
+
+[`WeightedRoundRobin`](src/Queue/WeightedRoundRobin.php) gives each lane
+credits for the round and skips a lane that has run out. HIGH hitting its
+limit is the pressure release that lets the others move. An empty lane
+forfeits its turn instead of blocking, so fairness costs nothing when there
+is nothing to be fair to.
+
+---
+
+## Metrics
+
+Two objects, because counters and gauges are different things.
+
+[`MetricsCollector`](src/Metrics/MetricsCollector.php) — cumulative:
+
+```text
+created   completed   failed   retried   dlq   worker_crashes   stale_acks
+```
+
+and three latencies, which are the point:
+
+| | measures | what a high value tells you |
+|---|---|---|
+| `queue_wait` | available → dispatched | add workers |
+| `execution` | how long the handler ran | fix the handler |
+| `end_to_end` | created → completed | includes deliberate delays and every failed attempt |
+
+> A slow job does not necessarily mean a slow handler. It may mean the job
+> waited in the queue.
+
+They are not three views of one number, and end-to-end is not the sum of the
+other two: a retried job passes through queue wait and execution once per
+attempt, inside one end-to-end span. A deliberate delay counts towards
+end-to-end and deliberately does **not** count as queue wait — the caller
+did wait, but the queue was not behind.
+
+[`QueueMetrics`](src/Metrics/QueueMetrics.php) — an immutable gauge reading:
+
+```php
+$dispatcher->observe()->toArray();
+// ['ready' => 12, 'delayed' => 3, 'processing' => 4, 'workers' => 4,
+//  'busy_workers' => 4, 'idle_workers' => 0, 'dead_lettered' => 1]
+```
+
+A counter is cumulative; a gauge is already stale when you read it. One bag
+for both is how "queue size: 40,000" ends up on a dashboard as a number that
+never goes down. It is read from the live objects rather than maintained by
+hand, because the one path that forgets to adjust a hand-kept gauge is
+invisible.
+
+The reading that matters most is two of them together: **idle workers and a
+non-empty ready queue at the same time** means the dispatcher is not keeping
+up, which is a different problem from either number being high alone.
+
+---
+
+## Graceful shutdown
 
 ```text
 SIGTERM
+   ↓
+stop accepting   →   stop dispatching   →   busy workers finish
+   ↓
+apply their results   →   tear the pool down
 ```
 
-Observe:
+```php
+$dispatcher->shutdown(grace: 5.0);   // null → wait as long as it takes
+```
+
+The grace period bounds the third step. When it runs out the remaining
+workers are killed — [`Worker::shutdown()`](src/Worker/Worker.php) closes
+the socket first, which is how a worker between jobs exits by itself, and
+reaches for SIGKILL only for one still inside a handler.
+
+The jobs those killed workers were holding stay PROCESSING: never
+acknowledged, so they come back through the visibility timeout, or across a
+restart through the persistence log. **A bounded shutdown is only safe
+because of that**, and there is a test that kills a worker mid-job and
+follows the job all the way back to READY.
+
+SIGTERM and SIGINT only set a flag. Nothing is shut down from inside a
+signal handler, because that is the only way the order of the steps stays
+knowable. Workers also reset their inherited signal handlers on fork —
+without that, a SIGTERM to the process group would run a runtime shutdown
+inside every worker.
+
+---
+
+## The runtime
+
+[`QueueRuntime`](src/Master/QueueRuntime.php) is the long-running process.
+`drain()` runs until the work runs out, which is right for a script and
+wrong for a server: a delayed job due in ten minutes, and a job whose
+visibility timeout has not expired yet, are both work that does not exist
+yet.
+
+One tick:
 
 ```text
-Worker
+dispatch every free worker
+        ↓
+apply every answer that arrived
+        ↓
+reclaim jobs whose ACK went overdue
+        ↓
+wait
+```
 
-↓
+The wait is the interesting part. A loop with no wait burns a core; a loop
+with a fixed sleep adds that sleep to every job's latency. So it waits on
+whichever comes first:
 
-DRAINING
+* a worker answering — `stream_select` wakes on it;
+* the next deadline it owns — `nextDeadline()`, answered without scanning;
+* 50ms, so a signal is never further away than that.
 
-↓
+`tick()` is public, because that is the honest way to test a runtime: a test
+drives the ticks itself with a clock it controls, instead of racing a
+background process.
 
-Current Job Completes
+---
 
-↓
+## At-least-once, and what it costs you
 
-STOPPED
+The queue cannot promise a job runs exactly once. Not because it is small —
+because the information does not exist:
+
+```text
+worker executes the job
+        ↓
+the side effect happens
+        ↓
+worker dies before the ACK
+```
+
+Retry, and the job may run twice. Do not retry, and it may never have run at
+all. Nothing in the queue can tell which, so it assumes the pessimistic one
+and delivers again.
+
+Which moves the problem to where it can actually be solved — the handler:
+
+```php
+// Bad: "charge this card"
+// Good: "charge order #123", once, whatever happens
+final class ChargePaymentJob
+{
+    public function __invoke(Job $job): JobResult
+    {
+        $key = $job->getIdempotencyKey();
+
+        if ($this->guard->isProcessed($key)) {
+            return JobResult::success();      // already happened
+        }
+
+        ($this->charger)($job->getPayload()['order_id'], $job->getPayload()['amount']);
+        $this->guard->markProcessed($key);
+
+        return JobResult::success();
+    }
+}
+```
+
+The key names the **operation**, not the delivery. And
+[`IdempotencyGuard`](src/Idempotency/IdempotencyGuard.php) persists, because
+a restart is exactly when a job that already ran comes back — PROCESSING
+jobs in the log return to READY, side effect and all.
+[`tests/Job/IdempotencyTest.php`](tests/Job/IdempotencyTest.php) charges the
+same order across a simulated crash and asserts one charge.
+
+---
+
+## Experiments
+
+```bash
+make docker-example EXAMPLE=basic-job        # the minimal milestone
+make docker-example EXAMPLE=failed-job       # retries → backoff → DLQ → manual retry
+make docker-example EXAMPLE=delayed-job      # deadline order, not push order
+make docker-example EXAMPLE=worker-crash     # kill -9 mid-job, job survives
+make docker-example EXAMPLE=priority-jobs    # starvation, and its cure
+```
+
+`worker-crash` prints this, and it is worth reading line by line:
+
+```text
+  [worker 5661] attempt 1, working...
+  [worker 5661] about to be killed mid-job
+  [worker 5662] attempt 2, working...
+  [worker 5662] finished cleanly
+
+job is COMPLETED after 2 attempt(s)
+counters {"created":1,"worker_crashes":1,"completed":1}
+```
+
+Different pid, second attempt, same job.
+
+### Break it yourself
+
+**Watch a graceful shutdown.** `make docker-run-worker`, then from another
+shell:
+
+```bash
+docker compose exec php pkill -TERM -f bin/worker.php
+```
+
+The 15-second job finishes, its result is applied, and only then does the
+process exit. Now do it with `-KILL` instead and nothing is applied — the
+job comes back through the visibility timeout on the next run.
+
+**Make the visibility timeout too short.** Set it below your handler's
+runtime and watch the same job run in two workers at once, with nothing
+crashed and nothing failing. That is the row of the ACK table people do not
+expect.
+
+**Take the DLQ away.** Pass `dlq: null` and run `failed-job`. The job still
+stops retrying — it just leaves nothing behind to look at.
+
+**Take the visibility timeout away.** Pass `visibilityTimeout: null`, then
+`kill -9` a busy worker. The EOF path still recovers the job; now kill the
+whole runtime instead and see what the log alone can restore.
+
+---
+
+## Failure matrix
+
+| what breaks | detected by | job outcome |
+|---|---|---|
+| handler throws | NACK | retried, then DLQ |
+| worker killed while busy | EOF on its socket | back to READY at once, worker replaced |
+| worker killed while idle | `maintain()` reaper | no job involved; capacity restored |
+| worker killed between check and write | `WorkerDiedException` | back to READY at once |
+| handler slower than the visibility timeout | deadline expires | delivered again; first answer becomes a stale ACK |
+| worker never answers | visibility timeout | back to READY when the deadline passes |
+| runtime killed with SIGTERM | signal handler | in-flight jobs finish within the grace period |
+| runtime killed with SIGKILL | nothing, until restart | PROCESSING jobs in the log return to READY |
+| queue process dies with no storage | nothing | jobs are lost — this is what storage is for |
+| job fails every attempt | attempts exhausted | FAILED, and a DLQ record |
+
+---
+
+## Performance
+
+`make docker-bench ARGS="<jobs> <workers> <work-microseconds>"`, no-op
+handlers, 8 workers, on the `php:8.5-cli` image:
+
+| jobs | drained in | throughput | peak memory | queue wait (avg) | execution (avg) |
+|--------:|-----------:|-----------:|------------:|-----------------:|----------------:|
+| 1,000 | 0.055s | 18,000/s | 4 MB | 23 ms | 0.08 ms |
+| 10,000 | 0.416s | 24,000/s | 12 MB | 215 ms | 0.14 ms |
+| 100,000 | 8.368s | 12,000/s | 96 MB | 5,129 ms | 0.30 ms |
+
+Which is the metrics section as a measurement rather than a claim: at
+100,000 jobs the average job took five seconds and the average handler took
+a third of a millisecond. The jobs were not slow. They were queued.
+
+Doubling the workers on no-op jobs does not double throughput — the
+dispatcher is one process writing to one socket at a time, and past a point
+it, not the workers, is the limit. Which is the honest shape of this design,
+not a bug in it.
+
+---
+
+## Project layout
+
+```text
+php-job-queue/
+├── bin/
+│   ├── run.php                     the lifecycle once (make run)
+│   ├── worker.php                  the long-running process (make run-worker)
+│   └── bench.php                   throughput and latency (make bench)
+├── examples/                       one mechanism each (make example EXAMPLE=…)
+├── src/
+│   ├── Job/                        Job, JobId, JobState, JobPriority, JobResult
+│   ├── Producer/                   Producer, JobFactory
+│   ├── Queue/                      Queue, InMemoryQueue, PriorityQueue,
+│   │                               LaneSelector + StrictPriority/WeightedRoundRobin
+│   ├── Scheduler/                  DelayedJobScheduler, DelayedJobHeap
+│   ├── Worker/                     Worker, WorkerPool, WorkerState,
+│   │                               WorkerOutcome, WorkerDiedException
+│   ├── Dispatcher/                 JobDispatcher
+│   ├── Retry/                      RetryPolicy + FixedDelay/ExponentialBackoff
+│   ├── Timeout/                    VisibilityMonitor
+│   ├── DLQ/                        DeadLetterQueue, DeadLetterRecord
+│   ├── Persistence/                JobStorage + InMemory/File
+│   ├── Metrics/                    MetricsCollector, QueueMetrics
+│   ├── Idempotency/                IdempotencyGuard, ChargePaymentJob
+│   ├── Master/                     QueueRuntime
+│   └── Support/                    Clock, SystemClock
+├── tests/
+│   ├── Chaos/                      kill things and follow the job
+│   ├── Stress/                     1,000 and 10,000 jobs
+│   └── …                           one directory per src/ namespace
+└── docs/
+    ├── ARCHITECTURE.md             the mechanisms in more depth
+    └── DECISIONS.md                what was chosen, rejected, and fixed
+```
+
+Time is injected everywhere through [`Clock`](src/Support/Clock.php).
+Everything about a queue is time — deadlines, delays, backoff, timeouts,
+latency — and reading it through an interface is what lets a test advance
+sixty seconds instantly instead of sleeping. One exception, marked where it
+happens: the shutdown grace period is wall-clock, because it is how long a
+real forked process gets to finish and no amount of faking time makes it
+faster.
+
+---
+
+## Engineering questions, answered
+
+**Why is exactly-once delivery difficult?** Because the queue cannot tell
+"the worker died before doing the work" from "the worker did the work and
+died before saying so". It has to guess, and guessing wrong in one direction
+loses work while the other repeats it. See
+[at-least-once](#at-least-once-and-what-it-costs-you).
+
+**Request timeout vs visibility timeout?** A request timeout is about how
+long *someone waits*. A visibility timeout is about how long a job may
+remain *unacknowledged*. Different problems: exceed the first and a caller
+gives up; exceed the second and the job is delivered to somebody else while
+the first worker is still running it.
+
+**Why does ACK exist?** Because "the worker received the job" is not "the
+job completed". Without an explicit acknowledgement there is no moment at
+which the queue may forget a job, and no way to distinguish a slow job from
+a lost one.
+
+**Why can a job execute twice?** Job executed → ACK lost → the queue assumes
+failure → redelivery. Expected in an at-least-once system, and observable
+here in two ways: a crash before the ACK, and a handler that outlives the
+visibility timeout.
+
+**Why must handlers be idempotent?** Because the queue's guarantee is
+at-least-once, and *your* guarantee has to be built on top of it. "Charge
+this card" is not safe to repeat; "charge order #123" is.
+
+**What happens when a worker crashes?** The worker is gone; the job is not.
+That distinction — worker lifecycle is not job lifecycle — is what most of
+this repository is about.
+
+---
+
+## What this is not
+
+Not RabbitMQ, Kafka, Redis, Temporal, Laravel Queue or Sidekiq. Specifically
+missing, and deliberately:
+
+* no network protocol — one process, forked workers, a Unix socket pair;
+* no shared queue between machines, so no distributed locking or leader
+  election;
+* no snapshots to bound the persistence replay;
+* no autoscaling — the pool size is fixed, because the interesting question
+  here is what happens to a **job** when a worker disappears
+  ([php-worker-pool](https://github.com/Researcher86/php-worker-pool) is
+  where autoscaling and recycling live);
+* no handler registry, container, or serialization framework;
+* no jitter on the backoff, and no rate limiting.
+
+Every one of those is a real production concern. Adding them would make the
+mechanisms harder to see, which is the only thing this repository is
+optimising for:
+
+```text
+Small enough to understand.
+Simple enough to modify.
+Real enough to fail.
+Reliable enough to study.
 ```
 
 ---
 
-# Roadmap
+## Related projects
 
-The project is implemented incrementally.
+Three repositories, one subject, in order of depth:
 
-## Phase 1 — Basic Job Queue
-
-```text
-Job
-
-Queue
-
-Dispatch
-
-Reserve
-
-ACK
-```
-
-## Phase 2 — Worker
-
-```text
-Worker Loop
-
-Job Processor
-
-Handler Resolver
-```
-
-## Phase 3 — Job Lifecycle
-
-```text
-PENDING
-
-RESERVED
-
-RUNNING
-
-COMPLETED
-```
-
-## Phase 4 — Failures
-
-```text
-Exceptions
-
-Retries
-
-Retry Policy
-
-Backoff
-```
-
-## Phase 5 — Delayed Jobs
-
-```text
-Delayed Queue
-
-Scheduled Execution
-
-Move To Pending
-```
-
-## Phase 6 — Worker Crash Recovery
-
-```text
-Reservation
-
-Visibility Timeout
-
-Expired Reservation Recovery
-```
-
-## Phase 7 — Graceful Shutdown
-
-```text
-RUNNING
-
-↓
-
-DRAINING
-
-↓
-
-STOPPED
-```
-
-## Phase 8 — Failed Jobs
-
-```text
-Failed Job Storage
-
-Inspection
-
-Manual Retry
-```
-
-## Phase 9 — Concurrency
-
-```text
-Multiple Workers
-
-Atomic Reservation
-
-Job Distribution
-```
+* [**php-concurrency**](https://github.com/Researcher86/php-concurrency) —
+  processes, forks, signals and IPC in PHP from the bottom up. The
+  groundwork.
+* [**php-worker-pool**](https://github.com/Researcher86/php-worker-pool) — a
+  master process with an event loop, a pool of forked workers, autoscaling,
+  recycling, telemetry over shared memory. How to keep N processes alive and
+  busy.
+* **php-job-queue** (this one) — what happens to the *work* when those
+  processes fail. Worker lifecycle is not job lifecycle, and this is the
+  half of the problem the pool does not answer.
 
 ---
-
-# Related Projects
-
-This project is part of a collection of educational PHP backend and concurrency projects.
-
-## [PHP Concurrency](https://github.com/Researcher86/php-concurrency)
-
-A practical collection of experiments exploring concurrency in PHP.
-
-It focuses on concepts such as:
-
-* processes;
-* `pcntl_fork`;
-* IPC;
-* Fibers;
-* event loops;
-* asynchronous execution;
-* concurrency patterns.
-
-It provides the foundation for understanding how multiple units of work can execute concurrently.
-
-## [PHP Worker Pool](https://github.com/Researcher86/php-worker-pool)
-
-An educational implementation of a reusable Worker Pool.
-
-It explores:
-
-* Worker lifecycle;
-* process management;
-* Worker states;
-* task execution;
-* Worker recycling;
-* graceful shutdown;
-* `DRAINING`.
-
-`php-job-queue` builds on these concepts and focuses on the next layer:
-
-```text
-php-concurrency
-        ↓
-Concurrency fundamentals
-        ↓
-php-worker-pool
-        ↓
-Worker lifecycle and process management
-        ↓
-php-job-queue
-        ↓
-Reliable background job processing
-```
-
----
-
-# What This Project Is Not
-
-This project is intentionally **not** trying to become:
-
-* RabbitMQ;
-* Apache Kafka;
-* Redis;
-* Symfony Messenger;
-* Laravel Queue;
-* Laravel Horizon;
-* Temporal.
-
-Production systems contain many additional concerns:
-
-```text
-Distributed Storage
-
-Network Failures
-
-Replication
-
-High Availability
-
-Authentication
-
-Authorization
-
-Metrics
-
-Tracing
-
-Monitoring
-
-Dead Letter Queues
-
-Priority Queues
-
-Persistence
-
-Horizontal Scaling
-```
-
-Those are valuable problems.
-
-But they can hide the fundamental ideas.
-
-This project focuses on the core model first.
-
----
-
-# Mental Model
-
-The entire system can be reduced to:
-
-```text
-                    PRODUCER
-                        │
-                        ▼
-                   CREATE JOB
-                        │
-                        ▼
-                     QUEUE
-                        │
-                        ▼
-                    PENDING
-                        │
-                        ▼
-                   RESERVATION
-                        │
-                        ▼
-                     WORKER
-                        │
-                        ▼
-                    HANDLER
-                        │
-             ┌──────────┴──────────┐
-             ▼                     ▼
-          SUCCESS                FAILURE
-             │                     │
-             ▼                     ▼
-            ACK                 RETRY
-             │                     │
-             ▼                     ▼
-         COMPLETED          DELAYED / FAILED
-```
-
----
-
-# Final Principle
-
-The purpose of this project is not to build the most feature-rich queue.
-
-The purpose is to build an:
-
-> **Executable mental model of a background job processing system.**
-
-The project should remain:
-
-> **Small enough to understand.**
-
-> **Real enough to experiment with.**
-
-> **Simple enough to modify.**
-
-> **Complex enough to demonstrate real engineering problems.**
 
 ## License
 
-MIT
+MIT.

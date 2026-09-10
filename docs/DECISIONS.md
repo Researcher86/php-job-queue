@@ -1,0 +1,377 @@
+# Decisions
+
+What was chosen, what was rejected, and the bugs that changed the design.
+Indexed by decision, so a question like "why is a retry not its own queue?"
+has one place to look.
+
+The phases these belong to are in [PLAN.md](../PLAN.md); the mechanisms
+themselves are in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
+## 1. Workers are forked processes, not objects
+
+**Chosen:** `pcntl_fork()` per worker, with a Unix socket pair.
+
+**Rejected:** a "worker" class that calls the handler in-process. It would
+have made every test synchronous and every failure a caught exception.
+
+**Why:** the questions the project exists to answer are what happens to a
+*job* when its worker segfaults, hangs, or is `kill -9`'d. None of those are
+expressible in-process. A caught exception is not a crash, and a test that
+simulates one is testing the simulation.
+
+The cost is real: tests fork, the suite takes nine seconds instead of one,
+and a leaked child process is a real failure mode the suite has to avoid.
+Worth it — every chaos test kills a real process and follows a real job.
+
+---
+
+## 2. A retry is a delayed job
+
+**Chosen:** `markRetry($availableAt)` puts a job in READY with a future
+`availableAt`, and the same `DelayedJobScheduler` that holds delayed jobs
+holds it.
+
+**Rejected:** a separate retry queue, or a "retry at" field checked
+separately at pop time.
+
+**Why:** they are the same thing. A job that may not run until a time is a
+job that may not run until a time, whether that time came from
+`delay: 3600` or from an exponential backoff. Two mechanisms would mean two
+places to get the boundary condition wrong, and two things to explain.
+
+The visible consequence: `delayedSize()` counts jobs waiting on a backoff as
+well as jobs waiting on a delay, which is correct — both are "waiting, not
+available".
+
+---
+
+## 3. The delayed set is a min-heap
+
+**Chosen:** `SplHeap` ordered by `availableAt`, with insertion order as a
+tie-break.
+
+**Rejected:** an array re-sorted on every push (what it was originally).
+
+**Why:** three reasons, in increasing order of importance.
+
+1. O(log n) to insert instead of O(n log n).
+2. The sort was redundant work — it re-ordered jobs whose position had not
+   changed. With a fixed-delay retry policy and a queue of failing jobs,
+   every single failure paid for a full sort.
+3. **`nextDeadline()` in O(1) off the root.** This is the one that mattered:
+   it is what lets `QueueRuntime` sleep *until* the next deadline instead of
+   waking up to ask whether it has arrived. Without it the loop needs a
+   fixed poll interval, which is either a busy loop or added latency on
+   every job.
+
+The tie-break is not decoration. A burst of fixed-delay retries all land on
+the same timestamp, and without it the order they come back out in is
+whatever the heap's internal swaps produce. The sorted array had FIFO there,
+because PHP's sort has been stable since 8.0, and losing it would have been
+a silent regression.
+
+---
+
+## 4. Attempts count deliveries, not runs
+
+**Chosen:** `markProcessing()` increments `attempts`, so a job handed to a
+worker that died before starting has used one.
+
+**Rejected:** incrementing on completion, or refunding an attempt when a
+delivery demonstrably never ran.
+
+**Why:** the queue cannot tell whether a delivery ran. That is the whole
+premise of at-least-once — if it could distinguish "never started" from
+"finished but never acknowledged", exactly-once would be easy. Refunding
+attempts for the cases it *can* detect would make the counter mean different
+things in different failure modes.
+
+Real queues count receipts too (SQS's `ApproximateReceiveCount`), for the
+same reason.
+
+---
+
+## 5. A worker reports an outcome, not a result
+
+**Chosen:** `WorkerOutcome(Job, ?JobResult)`, where a null result means the
+worker died holding the job.
+
+**Rejected:** `JobResult::failure(new WorkerCrashedException())`.
+
+**Why:** they need opposite handling. A NACK consumes an attempt and may end
+in the DLQ, because the job was tried and did not work. A crash consumes
+nothing conclusive and puts the job straight back, because nothing reported
+anything about it. Encoding a crash as a failure would have made
+`maxAttempts` count worker deaths against a job that may be perfectly fine.
+
+---
+
+## 6. Two crash detection paths, kept apart
+
+**Chosen:** a busy worker's death is found by EOF in `collect()`; an idle
+worker's by `waitpid(WNOHANG)` in `maintain()`. `Worker::reap()` refuses to
+look at busy workers.
+
+**Rejected:** one reaper for all states, or a `SIGCHLD` handler.
+
+**Why:** only the EOF path knows *which job* died with the worker. A reaper
+that got there first would mark the worker DEAD, and the job would sit in
+the in-flight set until its visibility deadline instead of being requeued
+immediately. Keeping the paths disjoint means each crash is handled by the
+one detector that has enough information.
+
+`SIGCHLD` was rejected separately: an async handler racing the poll loop is
+how the reap-versus-respond ordering bugs in
+[php-worker-pool](https://github.com/Researcher86/php-worker-pool) happened,
+and a synchronous non-blocking `waitpid` once per tick costs one syscall per
+idle worker.
+
+**Bug this fixed:** an idle worker's death was invisible. The pool reported
+it as available, `hasDeadWorkers()` as false, and the next `assign()` threw
+`RuntimeException` out of the dispatch loop — taking the runtime down and
+leaving the job marked PROCESSING with nothing behind it. Verified before
+fixing.
+
+---
+
+## 7. Nothing happens in a signal handler
+
+**Chosen:** `SIGTERM`/`SIGINT` set a boolean. The loop notices on its next
+pass and runs the shutdown itself.
+
+**Rejected:** shutting down from inside the handler.
+
+**Why:** the shutdown has an order — stop accepting, drain, collect, tear
+down — and a handler can fire in the middle of any of those steps. Setting a
+flag makes the ordering knowable, at the cost of up to `$maxWait` (50ms) of
+latency before the shutdown starts.
+
+Related: workers reset inherited handlers to `SIG_DFL` immediately after
+forking. Without that, a SIGTERM to the process group runs a runtime
+shutdown inside every worker.
+
+---
+
+## 8. The shutdown grace period is wall-clock
+
+**Chosen:** `microtime()` for the grace deadline, even though `Clock` is
+injected everywhere else.
+
+**Why:** every other deadline in the system is about job semantics, and a
+test needs to advance those sixty seconds instantly. This one is about how
+long a real forked process gets to finish real work, and no amount of faking
+time makes a fork run faster. A `FakeClock` that never advances would have
+turned the grace loop into an infinite one.
+
+Marked at the site, because an inconsistency that is deliberate has to say
+so.
+
+---
+
+## 9. Counters and gauges are separate objects
+
+**Chosen:** `MetricsCollector` (cumulative) and `QueueMetrics` (a snapshot,
+read from the live objects by `observe()`).
+
+**Rejected:** gauges as more entries in the counter bag; or gauges
+maintained incrementally as jobs move.
+
+**Why:** two different reasons.
+
+* A counter only grows; a gauge is already stale when you read it. One bag
+  for both is how "queue size: 40,000" ends up on a dashboard as a number
+  that never goes down.
+* A hand-maintained gauge drifts. Every push, pop, crash, requeue and
+  shutdown would have to remember to adjust it, and the one path that
+  forgets is invisible — the number is simply wrong, with nothing to
+  compare it against. Reading it from the live objects cannot drift.
+
+---
+
+## 10. Three latencies, not one
+
+**Chosen:** `queue_wait`, `execution`, `end_to_end`, measured separately.
+
+**Why:** they lead to different fixes. Queue wait high and execution low
+means add workers; the reverse means fix the handler. One number cannot say
+which, and the bench makes the difference concrete: at 100,000 jobs the
+average job took five seconds and the average handler took a third of a
+millisecond.
+
+Queue wait is measured from `availableAt`, **not** from `createdAt`, so a
+job deliberately delayed by an hour does not report an hour of queue wait.
+It reports that hour in end-to-end, where it belongs: the caller did wait,
+but the queue was not behind. There is a test for exactly that distinction,
+because it is the kind of thing that looks like a bug either way round.
+
+---
+
+## 11. Strict priority is the default, and starvation is demonstrated
+
+**Chosen:** `StrictPriority` by default, `WeightedRoundRobin` available,
+both tested — including a test that shows strict priority starving a LOW job
+forever.
+
+**Rejected:** making the fair policy the default and mentioning starvation
+in a comment.
+
+**Why:** strict priority is what "priority queue" means to most people, and
+its failure mode is the thing worth understanding. A default that quietly
+avoids the problem teaches nothing. The starvation test keeps one HIGH job
+arriving for every job served — what a busy system looks like — and the LOW
+job pushed first is still waiting fifty pops later. The next test fits the
+weighted selector to the same load and it comes out sixth.
+
+The policy is an object rather than a flag for the same reason `RetryPolicy`
+is: the queue's job is holding jobs in lanes, and this question has more
+than one defensible answer.
+
+---
+
+## 12. Append-only log, and a torn final record is tolerated
+
+**Chosen:** one JSON object per line, appended, keyed by job id, last write
+wins. `load()` drops a malformed **final** line and throws on a malformed
+line anywhere else.
+
+**Rejected:** rewriting a snapshot file on each change; and refusing to load
+a log with any bad line in it.
+
+**Why:** appending is the operation that is hard to half-finish. A crash
+mid-append leaves a truncated last line and every complete line before it
+intact; a crash mid-rewrite can lose the whole file. And the torn line is
+*from the crash we are recovering from* — refusing to start because the last
+record is half-written makes the log useless exactly when it is needed. A
+bad line in the middle is a different claim (this file is corrupt, or is not
+a job log) and should not be swallowed.
+
+Not done: periodic snapshots to bound the replay. The log grows with every
+state change and `load()` replays all of it. Stated as a limitation rather
+than hidden.
+
+**Bug this fixed:** `load()` used `JSON_THROW_ON_ERROR` and died on the torn
+line — the docblock claimed crash tolerance the code did not have.
+
+---
+
+## 13. Every collaborator of the dispatcher is optional
+
+**Chosen:** `RetryPolicy`, `DeadLetterQueue`, `JobStorage`,
+`MetricsCollector` and the visibility timeout are all nullable constructor
+arguments.
+
+**Rejected:** requiring them, with null-object implementations for the
+"off" case.
+
+**Why:** each one is a mechanism the reader is supposed to be able to
+examine on its own — and to *see the system work without*. Running the queue
+with no DLQ and watching a job stop retrying with nothing left behind
+explains the DLQ better than any docblock. Null objects would have hidden
+that switch behind an extra class each.
+
+---
+
+## 14. `dispatchPending()` and `collect()` are separate
+
+**Chosen:** two methods, called in sequence by both `drain()` and
+`QueueRuntime::tick()`.
+
+**Rejected:** `dispatchNext()` as the only loop primitive (which is what it
+was).
+
+**Why:** dispatch-one-and-wait gives a pool of one, whatever its size says.
+Splitting the halves is what lets N workers run N jobs concurrently.
+`dispatchNext()` still exists, because a script or a test sometimes wants
+one job to have happened by the time the call returns — with a docblock
+saying exactly why a runtime must not be built on it.
+
+---
+
+## 15. A late answer is counted and ignored
+
+**Chosen:** `applyResult()` checks that the job is still PROCESSING; if not,
+it increments `stale_acks` and returns — pointedly **without** releasing the
+visibility monitor.
+
+**Why:** the answer belongs to a delivery nobody is waiting for any more,
+but what the monitor tracks under that job's id is the *live* delivery.
+Releasing there would leave the live delivery untracked, and a job with no
+deadline and no worker accountable for it is a lost job. So a harmless
+duplicate would have become a real loss.
+
+Counting rather than silently dropping, because a rising `stale_acks` has a
+diagnosis: the visibility timeout is shorter than the work it is timing.
+
+**Bug this fixed:** the second answer walked into `markCompleted()` on an
+already-COMPLETED job and threw `LogicException` out of the dispatch loop.
+Found by writing the slow-handler chaos test, not by review.
+
+---
+
+## 16. State machines are tables, and flags are not states
+
+**Chosen:** one `TRANSITIONS` table per state machine (`Job`, `Worker`),
+with a single private `apply()` as the only thing that assigns a state.
+
+**Rejected:** per-method guards (what both classes had); and a boolean
+alongside the enum (what `Worker` had).
+
+**Why:** with a table, adding a state means editing one place and
+immediately seeing every event it has to answer for. With guards spread over
+seven methods, a state that answers one event wrongly is invisible until
+something breaks.
+
+The boolean was worse than untidy. `Worker` kept a `$draining` flag next to
+a `WorkerState` enum that had a `DRAINING` case it never entered, and
+`drain()` assigned `$this->state` directly — bypassing the only gate that
+was supposed to exist. What the flag was standing in for is a real
+distinction, and it is now explicit: the **state** says whether new work may
+be dispatched here, `isWorking()` says whether work is happening. A worker
+drained mid-job is DRAINING — not available, still working.
+
+---
+
+## 17. `fromName()` walks `cases()`
+
+**Chosen:** an explicit loop over `self::cases()`, throwing `ValueError`.
+
+**Rejected:** `constant("self::$name")`, which is what it was.
+
+**Why:** `constant()` resolves *any* class constant. A persistence log with
+an unexpected value in it would have returned whatever constant matched —
+including `Job::TRANSITIONS`. The input comes from a file on disk; it
+deserves a `ValueError`, not a lookup. There is a test that feeds it
+`'TRANSITIONS'`.
+
+---
+
+## 18. Formatting is settled by a tool
+
+**Chosen:** PHP CS Fixer, PER-CS 2.0 plus four rules, checked in CI.
+
+**Why:** the project is meant to be read, and a diff should show a change in
+behaviour rather than a change in brace placement.
+
+One preset rule is overridden: PER-CS wants `fn(`, and both this project and
+php-worker-pool were written with `fn (`. The existing spelling wins over
+the preset — consistency with the sibling repository is worth more than
+consistency with a document.
+
+---
+
+## Rejected outright
+
+Things that were considered and left out, with the reason.
+
+| idea | why not |
+|---|---|
+| Autoscaling the pool | [php-worker-pool](https://github.com/Researcher86/php-worker-pool)'s subject. Here a fixed pool makes "what happens to the job" easier to watch. |
+| A handler registry / DI container | A `Closure` per pool and a `match` on job type is enough, and keeps handlers free of the framework. |
+| Jitter on the backoff | Right in production, unreadable in an example. Named in the docblock instead. |
+| Snapshots for the persistence log | Bounded replay is a real need and a second mechanism to explain. Stated as a limitation. |
+| A network protocol | Would need auth, framing over TCP, and payload validation — all of it orthogonal to job semantics. |
+| Serializing exceptions across the socket | Not reliably possible, and the stack refers to a dead process. Class plus message is what a human needs. |
+| `SIGCHLD`-driven reaping | An async handler racing the poll loop is a known source of ordering bugs. One `waitpid` per tick is enough. |
+| A `ProcessingQueue` class | The in-flight set is the visibility monitor's, and it needs the deadlines anyway. A second holder of the same jobs would be two sources of truth. |
