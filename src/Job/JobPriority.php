@@ -4,20 +4,19 @@ declare(strict_types=1);
 
 namespace App\Job;
 
+/**
+ * How urgent a job is - PLAN.md Phase 13.
+ *
+ * Declaration order IS priority order, highest first, and everything that
+ * needs to walk the priorities in order walks JobPriority::cases(). There
+ * used to be an order() method returning 0/1/2 alongside it; two sources of
+ * truth for one fact, and the enum is the better one.
+ */
 enum JobPriority
 {
     case HIGH;
     case NORMAL;
     case LOW;
-
-    public function order(): int
-    {
-        return match ($this) {
-            self::HIGH => 0,
-            self::NORMAL => 1,
-            self::LOW => 2,
-        };
-    }
 
     public static function fromName(string $name): self
     {

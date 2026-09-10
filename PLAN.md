@@ -1407,6 +1407,36 @@ NORMAL → 3 jobs
 LOW    → 1 job
 ```
 
+### Implementation
+
+`PriorityQueue` holds one FIFO lane per priority and delegates the policy
+question to a `LaneSelector`:
+
+* `StrictPriority` — always the highest non-empty lane. The default, because
+  it is what "priority queue" usually means, and because its failure is
+  worth being able to watch.
+* `WeightedRoundRobin` — the example weights above. Each lane starts a round
+  with credits equal to its weight; the highest lane that has both jobs and
+  credits is served, and when no lane has both, the round refills. An empty
+  lane forfeits its turn instead of blocking, so fairness costs nothing when
+  there is nothing to be fair to.
+
+Starvation is not described here, it is demonstrated:
+`testStrictPriorityStarvesLowForever` keeps one HIGH job arriving for every
+job served - what a busy system looks like - and the LOW job pushed first is
+still waiting fifty pops later. The next test fits `WeightedRoundRobin` to
+the same scenario and it comes out sixth.
+
+### Tests
+
+* [x] Highest priority is served first
+* [x] FIFO within a priority
+* [x] Strict priority starves LOW under sustained load
+* [x] Weighted round robin gives LOW a turn
+* [x] Weighted round robin follows its weights (5 : 3 : 1)
+* [x] Empty lanes forfeit their turn rather than blocking
+* [x] Delayed jobs return to the lane for their own priority
+
 ---
 
 # Phase 14 — Metrics

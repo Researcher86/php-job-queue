@@ -12,32 +12,41 @@ use App\Support\Clock;
 use App\Support\SystemClock;
 
 /**
- * One FIFO lane per priority, drained highest-first - PLAN.md Phase 13.
+ * One FIFO lane per priority - PLAN.md Phase 13.
+ *
+ * The queue holds the lanes; a LaneSelector decides which one to serve
+ * next. That split is the point of the phase: StrictPriority always takes
+ * the highest non-empty lane and can starve LOW forever, WeightedRoundRobin
+ * gives each lane a share of the turns, and neither policy needs the queue
+ * to know which one it is running.
+ *
+ * The default is StrictPriority, because that is what "priority queue"
+ * usually means - and because its failure mode is worth being able to see.
  *
  * Delayed jobs are held by the same DelayedJobScheduler InMemoryQueue uses,
  * and land in the lane for their own priority once due. Waiting and
- * ordering are separate questions: a job's priority does not change when it
- * becomes available.
+ * ordering are separate questions: a job's priority does not change while
+ * it waits.
  */
 final class PriorityQueue implements Queue
 {
-    /** Drain order. Highest first, and LOW only once nothing else is ready. */
-    private const array LANES = [JobPriority::HIGH, JobPriority::NORMAL, JobPriority::LOW];
-
     private Clock $clock;
+
+    private LaneSelector $selector;
 
     private DelayedJobScheduler $scheduler;
 
     /** @var array<string, list<Job>> priority name => FIFO lane */
     private array $ready;
 
-    public function __construct(?Clock $clock = null)
+    public function __construct(?Clock $clock = null, ?LaneSelector $selector = null)
     {
         $this->clock = $clock ?? new SystemClock();
+        $this->selector = $selector ?? new StrictPriority();
         $this->scheduler = new DelayedJobScheduler();
         $this->ready = array_fill_keys(array_map(
             static fn (JobPriority $priority): string => $priority->name,
-            self::LANES,
+            JobPriority::cases(),
         ), []);
     }
 
@@ -68,15 +77,9 @@ final class PriorityQueue implements Queue
             $this->ready[$job->getPriority()->name][] = $job;
         }
 
-        foreach (self::LANES as $priority) {
-            $job = array_shift($this->ready[$priority->name]);
+        $lane = $this->selector->next(array_map('count', $this->ready));
 
-            if ($job !== null) {
-                return $job;
-            }
-        }
-
-        return null;
+        return $lane === null ? null : array_shift($this->ready[$lane->name]);
     }
 
     public function size(): int
