@@ -12,7 +12,7 @@ final class VisibilityMonitor
 {
     private Clock $clock;
 
-    private int $timeout;
+    private ?int $timeout;
 
     /** @var array<string, float> */
     private array $deadlines = [];
@@ -20,7 +20,7 @@ final class VisibilityMonitor
     /** @var array<string, Job> */
     private array $processing = [];
 
-    public function __construct(int $timeout, ?Clock $clock = null)
+    public function __construct(?int $timeout, ?Clock $clock = null)
     {
         $this->timeout = $timeout;
         $this->clock = $clock ?? new SystemClock();
@@ -28,6 +28,10 @@ final class VisibilityMonitor
 
     public function track(Job $job): void
     {
+        if ($this->timeout === null) {
+            return;
+        }
+
         $id = $job->getId()->toString();
         $this->deadlines[$id] = $this->clock->now() + $this->timeout;
         $this->processing[$id] = $job;

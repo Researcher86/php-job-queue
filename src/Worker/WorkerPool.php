@@ -66,8 +66,37 @@ final class WorkerPool
     public function poll(bool $block = false): ?WorkerResult
     {
         do {
+            $read = [];
+            $streamWorkers = [];
             foreach ($this->workers as $worker) {
                 if (!$worker->isBusy()) {
+                    continue;
+                }
+                $stream = $worker->getStream();
+                if (!is_resource($stream)) {
+                    continue;
+                }
+                $read[] = $stream;
+                $streamWorkers[(int) $stream] = $worker;
+            }
+
+            if ($read === []) {
+                return null;
+            }
+
+            $write = null;
+            $except = null;
+            $ready = @stream_select($read, $write, $except, $block ? null : 0);
+            if ($ready === false || $ready === 0) {
+                if ($block) {
+                    continue;
+                }
+                return null;
+            }
+
+            foreach ($read as $stream) {
+                $worker = $streamWorkers[(int) $stream] ?? null;
+                if ($worker === null) {
                     continue;
                 }
                 $outcome = $worker->collect(false);
@@ -76,11 +105,9 @@ final class WorkerPool
                 }
             }
 
-            if (!$block || $this->busyCount() === 0) {
+            if (!$block) {
                 return null;
             }
-
-            usleep(1000);
         } while (true);
     }
 

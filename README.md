@@ -984,6 +984,25 @@ This is important during:
 
 One of the main purposes of this project is to experiment with failure.
 
+## Crash Matrix
+
+A crash at a different point produces a different guarantee. This is the model
+the whole repository is built on:
+
+| Crash point                        | Expected behavior                                              |
+|------------------------------------|----------------------------------------------------------------|
+| before reservation                 | job remains PENDING, nothing changes                           |
+| after reservation, before dispatch | job becomes visible again (visibility timeout re-queues it)    |
+| during execution                   | worker dies → job returns to queue and is retried              |
+| after business side effect, before ACK | duplicate execution is possible (at-least-once semantics)  |
+| after ACK                          | no retry — job is COMPLETED                                    |
+| during persistence                 | recovery required; last written state wins                     |
+| after idempotency claim            | depends on ordering of claim vs. side effect                   |
+
+The interesting boundary is *"side effect written, ACK not yet sent"*. That gap
+is where at-least-once delivery turns into duplicate execution, and why
+handlers must be idempotent.
+
 ## Worker Crash
 
 ```text

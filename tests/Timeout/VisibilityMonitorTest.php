@@ -31,6 +31,20 @@ final class VisibilityMonitorTest extends TestCase
         $this->assertTrue($monitor->isProcessing($job));
     }
 
+    public function testNullTimeoutDisablesTracking(): void
+    {
+        $monitor = new VisibilityMonitor(null, $this->clock);
+        $job = Job::create(type: 'a');
+        $job->markReady(1000.0);
+        $job->markProcessing();
+        $monitor->track($job);
+
+        $this->assertFalse($monitor->isProcessing($job));
+
+        $this->clock->advance(3600.0);
+        $this->assertSame([], $monitor->requeueExpired());
+    }
+
     public function testReleasedJobIsNoLongerProcessing(): void
     {
         $monitor = new VisibilityMonitor(30, $this->clock);

@@ -158,6 +158,11 @@ final class Worker
         return $this->id;
     }
 
+    public function getStream(): mixed
+    {
+        return $this->stream;
+    }
+
     public function getPid(): int
     {
         return $this->pid;

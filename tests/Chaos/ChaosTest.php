@@ -355,8 +355,7 @@ final class ChaosTest extends TestCase
 
         $pool = new WorkerPool(2, static function (Job $job) use ($completedFile): void {
             usleep(100_000);
-            $count = (int) file_get_contents($completedFile);
-            file_put_contents($completedFile, (string) ($count + 1), LOCK_EX);
+            file_put_contents($completedFile, "done\n", FILE_APPEND | LOCK_EX);
         });
         $pool->start();
 
@@ -370,7 +369,7 @@ final class ChaosTest extends TestCase
 
         // drain() waits for in-flight jobs to complete before returning
         $this->assertSame(0, $queue->size());
-        $this->assertSame(2, (int) file_get_contents($completedFile));
+        $this->assertSame(2, substr_count((string) file_get_contents($completedFile), 'done'));
 
         $pool->shutdown();
         @unlink($completedFile);

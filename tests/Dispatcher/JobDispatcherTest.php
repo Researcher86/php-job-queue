@@ -226,6 +226,26 @@ final class JobDispatcherTest extends TestCase
         $this->assertSame(0, $queue->size());
     }
 
+    public function testNullVisibilityTimeoutDoesNotExpireInFlightJobs(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool->start();
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $job = Job::create(type: 'a');
+        $queue->push($job);
+
+        $this->assertTrue($dispatcher->dispatchNext());
+        $this->assertSame(JobState::COMPLETED, $job->getState());
+
+        $clock->advance(3600.0);
+        $this->assertSame(0, $dispatcher->requeueExpired());
+
+        $pool->shutdown();
+    }
+
     public function testExhaustedJobIsSentToDeadLetterQueue(): void
     {
         $clock = new FakeClock(1000.0);

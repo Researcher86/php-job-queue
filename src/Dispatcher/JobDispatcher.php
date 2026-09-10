@@ -37,7 +37,7 @@ final class JobDispatcher
         private ?JobStorage $storage = null,
         private ?MetricsCollector $metrics = null,
     ) {
-        $this->monitor = new VisibilityMonitor($visibilityTimeout ?? 0, $clock);
+        $this->monitor = new VisibilityMonitor($visibilityTimeout, $clock);
     }
 
     public function dispatchNext(): bool
