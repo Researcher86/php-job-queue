@@ -22,11 +22,12 @@ declare(strict_types=1);
  *    whole truth about what the object holds, and `readonly` goes on
  *    everything that is never reassigned.
  *
- * The one thing that is NOT promoted is a collaborator the object owns
- * outright and nobody may substitute - PriorityQueue's DelayedJobScheduler,
- * the scheduler's own heap. Those are built in the body, because putting
- * them in the signature would advertise that two queues could be made to
- * share one, which would be a bug rather than a configuration.
+ * That goes for a collaborator the object owns as well, not just an
+ * injected dependency: `new` in a parameter default is evaluated per call,
+ * so `private readonly DelayedJobScheduler $scheduler = new
+ * DelayedJobScheduler()` still gives every queue its own. The result is
+ * that most constructors here have no body at all, and the ones that do
+ * have a reason worth reading.
  */
 
 $finder = PhpCsFixer\Finder::create()

@@ -28,23 +28,36 @@ final class InMemoryQueue implements Queue
 
     public function __construct(
         private readonly Clock $clock = new SystemClock(),
-        // Not readonly: restoreFromStorage() attaches the log only after the
-        // replay, so the replay does not write back what it just read.
-        private readonly ?JobStorage $storage = new DelayedJobScheduler(),
+        private readonly ?JobStorage $storage = null,
+        // A new one per queue, because the default is evaluated per call.
+        // Injectable so a test can look at the schedule directly.
+        private readonly DelayedJobScheduler $scheduler = new DelayedJobScheduler(),
     ) {
     }
 
     public function push(Job $job, int $delay = 0): void
+    {
+        $this->admit($job, $delay);
+
+        // The job's state changed, and the log has to know: recovery reads
+        // the LAST thing written about a job.
+        $this->persist($job);
+    }
+
+    /**
+     * Puts a job where it belongs without logging it.
+     *
+     * The half of push() that restoreFromStorage() wants: replaying the log
+     * must not write back every job it just read, or each restart would add
+     * a full copy of the log to it.
+     */
+    private function admit(Job $job, int $delay = 0): void
     {
         // Waiting or not is the scheduler's decision, and the same one for
         // both queues - see DelayedJobScheduler::holdIfNotDue().
         if (!$this->scheduler->holdIfNotDue($job, $delay, $this->clock->now())) {
             $this->ready[] = $job;
         }
-
-        // Either way the job's state changed, and the log has to know:
-        // recovery reads the LAST thing written about a job.
-        $this->persist($job);
     }
 
     public function pop(?float $now = null): ?Job
@@ -92,27 +105,23 @@ final class InMemoryQueue implements Queue
      */
     public static function restoreFromStorage(JobStorage $storage, Clock $clock = new SystemClock()): self
     {
-        // Replayed with no storage attached, then attached afterwards: a
-        // push() writes, and writing back every job we just read would add
-        // a full copy of the log on every restart. Nothing is lost by
-        // waiting - a job restored as READY that dies again before being
-        // dispatched is still logged as PROCESSING, and comes back the same
-        // way next time.
-        $queue = new self($clock);
+        $queue = new self($clock, $storage);
 
         foreach ($storage->load() as $data) {
             $job = Job::fromArray($data);
 
             if ($job->getState() === JobState::PROCESSING) {
-                $job->markRetry($queue->clock->now());
+                $job->markRetry($clock->now());
             }
 
             if (!$job->getState()->isTerminal()) {
-                $queue->push($job);
+                // admit(), not push(): see admit(). Nothing is lost by not
+                // re-logging - a job restored as READY that dies again
+                // before being dispatched is still logged as PROCESSING,
+                // and comes back the same way next time.
+                $queue->admit($job);
             }
         }
-
-        $queue->storage = $storage;
 
         return $queue;
     }

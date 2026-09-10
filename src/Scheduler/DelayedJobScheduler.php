@@ -37,17 +37,13 @@ use RuntimeException;
  */
 final class DelayedJobScheduler
 {
-    private DelayedJobHeap $heap;
-
     /** Insertion counter, the heap's tie-break for equal deadlines. */
     private int $sequence = 0;
 
-    public function __construct()
-    {
-        // Built here rather than taken as a promoted parameter: the heap is
-        // this object's own, and a constructor argument would advertise that
-        // two schedulers could be made to share one.
-        $this->heap = new DelayedJobHeap();
+    public function __construct(
+        // A new one per scheduler, because the default is evaluated per call.
+        private readonly DelayedJobHeap $heap = new DelayedJobHeap(),
+    ) {
     }
 
     /**

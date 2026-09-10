@@ -29,20 +29,27 @@ use App\Support\SystemClock;
  */
 final class PriorityQueue implements Queue
 {
-    private DelayedJobScheduler $scheduler;
-
-    /** @var array<string, list<Job>> priority name => FIFO lane */
-    private array $ready;
+    /**
+     * One FIFO per priority. Written out rather than built from
+     * JobPriority::cases(), so that pop() can index a lane without
+     * checking whether it exists - every case has one, and adding a case
+     * to the enum without a lane here is a fatal error rather than a
+     * silently dropped job.
+     *
+     * @var array<string, list<Job>> priority name => FIFO lane
+     */
+    private array $ready = [
+        JobPriority::HIGH->name => [],
+        JobPriority::NORMAL->name => [],
+        JobPriority::LOW->name => [],
+    ];
 
     public function __construct(
         private readonly Clock $clock = new SystemClock(),
         private readonly LaneSelector $selector = new StrictPriority(),
+        // A new one per queue - see InMemoryQueue.
+        private readonly DelayedJobScheduler $scheduler = new DelayedJobScheduler(),
     ) {
-        $this->scheduler = new DelayedJobScheduler();
-        $this->ready = array_fill_keys(array_map(
-            static fn (JobPriority $priority): string => $priority->name,
-            JobPriority::cases(),
-        ), []);
     }
 
     public function push(Job $job, int $delay = 0): void
