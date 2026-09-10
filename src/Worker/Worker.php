@@ -32,6 +32,16 @@ final class Worker
         ],
     ];
 
+    /**
+     * How long shutdown() waits for a worker to notice its socket closed
+     * and exit by itself, before reaching for SIGKILL. A worker between
+     * jobs takes microseconds; this is only generous because the cost of
+     * being wrong is killing a process that was about to leave politely.
+     */
+    private const float POLITENESS_BUDGET = 0.05;
+
+    private const int EXIT_POLL_INTERVAL_US = 1_000;
+
     /** @var list<resource> */
     private static array $allStreams = [];
 
@@ -72,11 +82,23 @@ final class Worker
         }
 
         if ($pid === 0) {
+            // A fork inherits its parent's signal handlers, and the parent
+            // here is the runtime: without this reset, a SIGTERM to the
+            // process group would run QueueRuntime::stop() inside every
+            // worker. A worker has no shutdown of its own to run - it
+            // leaves when its socket closes.
+            pcntl_signal(SIGTERM, SIG_DFL);
+            pcntl_signal(SIGINT, SIG_DFL);
+
+            // The pipes belonging to workers forked before this one. The
+            // child has no business holding them open, and a socket kept
+            // alive by a third process never reaches EOF at the other end.
             foreach (self::$allStreams as $resource) {
                 if ($resource !== $child && is_resource($resource)) {
                     fclose($resource);
                 }
             }
+
             $this->workerLoop($child);
             exit(0);
         }
@@ -162,7 +184,22 @@ final class Worker
         return true;
     }
 
-    public function collect(bool $block = false): ?WorkerOutcome
+    /**
+     * Reads the worker's answer, if it has one - PLAN.md Phase 6's ACK and
+     * NACK, arriving on the socket.
+     *
+     * $timeout is in seconds: 0.0 polls, null waits indefinitely, anything
+     * else waits at most that long. Returns null if nothing arrived in
+     * time, or if this worker is not working on anything.
+     *
+     * A premature EOF - the socket closing with no answer on it - is a
+     * crash: the worker is marked DEAD and the outcome carries a null
+     * result, which is what tells the dispatcher this job was never
+     * acknowledged and has to go back. Distinguishing "failed" from
+     * "vanished" is the whole point of returning an outcome rather than a
+     * JobResult here.
+     */
+    public function collect(?float $timeout = 0.0): ?WorkerOutcome
     {
         if ($this->state !== WorkerState::BUSY || !is_resource($this->stream)) {
             return null;
@@ -171,7 +208,7 @@ final class Worker
         $read = [$this->stream];
         $write = null;
         $except = null;
-        $ready = @stream_select($read, $write, $except, $block ? null : 0);
+        $ready = @stream_select($read, $write, $except, ...self::selectTimeout($timeout));
         if ($ready === false || $ready === 0) {
             return null;
         }
@@ -296,14 +333,61 @@ final class Worker
         }
     }
 
+    /**
+     * Ends the process for good - PLAN.md Phase 15's last step.
+     *
+     * Closing the socket is the polite request: a worker waiting for its
+     * next job reads EOF and returns from its loop on its own, which is
+     * how every worker that is between jobs exits. POLITENESS_BUDGET is
+     * how long that is given to happen - microseconds, in practice.
+     *
+     * What is left after that is a process inside a handler that outlasted
+     * the grace period, and it gets SIGKILL rather than SIGTERM: it has no
+     * handler installed for a signal (see spawn(), which resets them in
+     * the child) and nothing to save. Its job was never acknowledged, so
+     * the visibility timeout brings it back - which is exactly why killing
+     * it is safe.
+     *
+     * Then waitpid, blocking: after SIGKILL the process is already gone or
+     * about to be, and leaving it unreaped would leave a zombie.
+     */
     public function shutdown(): void
     {
         if (is_resource($this->stream)) {
             fclose($this->stream);
             $this->stream = null;
         }
-        if ($this->pid > 0) {
+
+        if ($this->pid <= 0) {
+            return;
+        }
+
+        if (!$this->waitForExit(self::POLITENESS_BUDGET)) {
+            posix_kill($this->pid, SIGKILL);
             pcntl_waitpid($this->pid, $status);
+        }
+
+        $this->pid = 0;
+    }
+
+    /**
+     * Polls waitpid until the process is gone or the budget runs out.
+     * Returns whether it exited (and was reaped) in time.
+     */
+    private function waitForExit(float $budget): bool
+    {
+        $deadline = microtime(true) + $budget;
+
+        while (true) {
+            if (pcntl_waitpid($this->pid, $status, WNOHANG) !== 0) {
+                return true;
+            }
+
+            if (microtime(true) >= $deadline) {
+                return false;
+            }
+
+            usleep(self::EXIT_POLL_INTERVAL_US);
         }
     }
 
@@ -391,6 +475,24 @@ final class Worker
             ));
         }
         $this->state = $next;
+    }
+
+    /**
+     * stream_select()'s timeout, split the way it wants it: whole seconds
+     * and microseconds, or [null] to block. Its own signature cannot take
+     * a float.
+     *
+     * @return array{0: ?int, 1?: int}
+     */
+    private static function selectTimeout(?float $timeout): array
+    {
+        if ($timeout === null) {
+            return [null];
+        }
+
+        $seconds = (int) $timeout;
+
+        return [$seconds, (int) (($timeout - $seconds) * 1_000_000)];
     }
 
     /**

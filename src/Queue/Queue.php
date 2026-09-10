@@ -41,4 +41,11 @@ interface Queue
 
     /** Jobs waiting for a deadline: a delay, or a retry under backoff. */
     public function delayedSize(): int;
+
+    /**
+     * When the earliest delayed job becomes available, or null if none is
+     * waiting. What lets a runtime loop sleep until there is something to
+     * do instead of waking up to ask.
+     */
+    public function nextDeadline(): ?float;
 }

@@ -42,6 +42,18 @@ final class JobDispatcher
         $this->monitor = new VisibilityMonitor($visibilityTimeout, $clock);
     }
 
+    /**
+     * Dispatches one job to one free worker and waits for its answer.
+     *
+     * The synchronous shape makes it useful for a test or a one-off script
+     * that wants a single job to have happened by the time the call
+     * returns. QueueRuntime does not use it: a runtime that waits for each
+     * job before dispatching the next has a pool of one, whatever its size
+     * says.
+     *
+     * Returns whether a job was dispatched - false if no worker was free,
+     * no job was available, or the worker turned out to be dead.
+     */
     public function dispatchNext(): bool
     {
         if (!$this->accepting) {
@@ -64,14 +76,78 @@ final class JobDispatcher
             return false;
         }
 
-        $result = $this->workerPool->poll(true);
-        if ($result !== null) {
-            $this->applyResult($result->getWorker(), $result->getOutcome());
-        }
+        $this->collect(null);
 
         return true;
     }
 
+    /**
+     * Fills every free worker from the queue, without waiting for any of
+     * them. Returns how many jobs went out.
+     *
+     * The half of the loop that moves work forward; collect() is the other
+     * half. Keeping them apart is what lets a pool of N run N jobs at once
+     * instead of one at a time.
+     */
+    public function dispatchPending(): int
+    {
+        if (!$this->accepting) {
+            return 0;
+        }
+
+        $this->workerPool->maintain();
+
+        $dispatched = 0;
+
+        while (($worker = $this->workerPool->getAvailableWorker()) !== null) {
+            $job = $this->queue->pop();
+
+            if ($job === null) {
+                break;
+            }
+
+            if ($this->dispatch($worker, $job)) {
+                $dispatched++;
+            }
+        }
+
+        return $dispatched;
+    }
+
+    /**
+     * Applies every answer that has arrived, waiting up to $timeout seconds
+     * for the first one. Returns how many were applied.
+     *
+     * $timeout is in seconds: 0.0 polls, null waits until something
+     * arrives, anything else waits at most that long. Once the first answer
+     * is in, the rest are drained without waiting - if three workers
+     * finished while we were busy, all three results are applied in this
+     * call rather than one per loop iteration.
+     */
+    public function collect(?float $timeout = 0.0): int
+    {
+        $applied = 0;
+
+        for ($result = $this->workerPool->poll($timeout); $result !== null; $result = $this->workerPool->poll()) {
+            $this->applyResult($result->getWorker(), $result->getOutcome());
+            $applied++;
+        }
+
+        return $applied;
+    }
+
+    /**
+     * Runs the queue until it is empty and every dispatched job has been
+     * answered, then tears the pool down. Returns how many jobs were
+     * dispatched - which counts redeliveries, so it can exceed the number
+     * of distinct jobs.
+     *
+     * The batch counterpart to QueueRuntime: same two halves, no signals,
+     * and it stops when the work runs out instead of waiting for more.
+     * Retries scheduled with a delay come back inside this loop, so a
+     * FakeClock that never advances will leave them behind - which is what
+     * makes it usable in a test at all.
+     */
     public function drain(): int
     {
         $dispatched = 0;
@@ -79,31 +155,21 @@ final class JobDispatcher
 
         try {
             while (true) {
-                $this->workerPool->maintain();
+                $dispatched += $this->dispatchPending();
 
-                while (($worker = $this->workerPool->getAvailableWorker()) !== null) {
-                    $job = $this->queue->pop();
-                    if ($job === null) {
-                        break;
-                    }
-
-                    if ($this->dispatch($worker, $job)) {
-                        $dispatched++;
-                    }
+                if ($this->collect() > 0) {
+                    continue;
                 }
 
-                $result = $this->workerPool->poll();
-                if ($result === null) {
-                    if ($this->workerPool->busyCount() === 0) {
-                        break;
-                    }
-                    $result = $this->workerPool->poll(true);
-                    if ($result === null) {
-                        break;
-                    }
+                // Nothing came back this time round. If nobody is working,
+                // nothing is going to.
+                if ($this->workerPool->busyCount() === 0) {
+                    break;
                 }
 
-                $this->applyResult($result->getWorker(), $result->getOutcome());
+                if ($this->collect(null) === 0) {
+                    break;
+                }
             }
         } finally {
             $this->workerPool->shutdown();
@@ -112,15 +178,50 @@ final class JobDispatcher
         return $dispatched;
     }
 
+    /**
+     * Returns every job whose ACK went overdue to the queue, and reports
+     * how many - PLAN.md Phase 9.
+     *
+     * Nothing calls this on a timer by itself: QueueRuntime calls it once
+     * per tick, and a test calls it when it wants to ask "what would the
+     * monitor reclaim right now?".
+     */
     public function requeueExpired(): int
     {
         $count = 0;
+
         foreach ($this->monitor->requeueExpired() as $expired) {
             $this->queue->push($expired);
             $count++;
         }
 
         return $count;
+    }
+
+    /**
+     * The next instant at which the runtime has something to do on its own
+     * - the earliest of a delayed job becoming available and a visibility
+     * deadline running out - or null if it is only waiting on workers.
+     *
+     * What lets the loop sleep instead of poll: see QueueRuntime::tick().
+     */
+    public function nextDeadline(): ?float
+    {
+        $deadlines = array_filter([$this->queue->nextDeadline(), $this->monitor->nextDeadline()]);
+
+        return $deadlines === [] ? null : min($deadlines);
+    }
+
+    /** Whether any worker is holding a job right now. */
+    public function hasWorkInFlight(): bool
+    {
+        return $this->workerPool->busyCount() > 0;
+    }
+
+    /** Forks the workers, if they are not running already. */
+    public function start(): void
+    {
+        $this->workerPool->start();
     }
 
     public function isProcessing(Job $job): bool
@@ -153,16 +254,47 @@ final class JobDispatcher
         return $this->accepting;
     }
 
-    public function shutdown(): void
+    /**
+     * Graceful shutdown - PLAN.md Phase 15.
+     *
+     *   stop accepting  ->  stop dispatching  ->  let workers finish
+     *   ->  apply their results  ->  tear the pool down
+     *
+     * $grace bounds the third step, in seconds; null waits as long as it
+     * takes. When it runs out, WorkerPool::shutdown() kills whatever is
+     * left, and the jobs those workers were holding stay PROCESSING: they
+     * were never acknowledged, so they come back through the visibility
+     * timeout (or, across a restart, through the persistence log). Losing
+     * the process must not mean losing the job - that is the invariant, and
+     * a bounded shutdown is only safe because of it.
+     *
+     * The grace period is measured against the wall clock rather than the
+     * injected Clock, deliberately: it is how long a real forked process
+     * gets to finish its work, and no amount of faking time makes a fork
+     * run faster. For SystemClock the two are the same thing anyway.
+     */
+    public function shutdown(?float $grace = null): void
     {
         $this->accepting = false;
+
+        // Idle workers stop now; busy ones are left completely alone to
+        // finish what they are doing.
         $this->workerPool->drain();
 
-        // Wait for in-flight jobs to finish before tearing the pool down.
+        $deadline = $grace === null ? null : microtime(true) + $grace;
+
         while ($this->workerPool->busyCount() > 0) {
-            $result = $this->workerPool->poll(true);
-            if ($result !== null) {
-                $this->applyResult($result->getWorker(), $result->getOutcome());
+            $remaining = $deadline === null ? null : $deadline - microtime(true);
+
+            if ($remaining !== null && $remaining <= 0.0) {
+                break;
+            }
+
+            // An indefinite wait that comes back empty means every busy
+            // worker died without answering - there is nothing left to
+            // wait for.
+            if ($this->collect($remaining) === 0 && $remaining === null) {
+                break;
             }
         }
 

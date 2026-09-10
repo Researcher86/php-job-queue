@@ -1,6 +1,6 @@
 .PHONY: install test analyse lint fix run up down build shell \
         docker-install docker-test docker-analyse docker-lint docker-fix \
-        docker-run docker-run-debug
+        docker-run docker-run-worker docker-run-debug run-worker
 
 install:
 	composer install
@@ -20,6 +20,11 @@ fix:
 
 run:
 	php bin/run.php
+
+# The long-running process. SIGTERM it from another shell to watch a
+# graceful shutdown: `docker compose exec php pkill -TERM -f bin/worker.php`
+run-worker:
+	php bin/worker.php
 
 up:
 	docker compose up -d
@@ -50,6 +55,9 @@ docker-fix: up
 
 docker-run: up
 	docker compose exec php php bin/run.php
+
+docker-run-worker: up
+	docker compose exec php php bin/worker.php
 
 docker-run-debug: up
 	docker compose exec php bash -c "XDEBUG_TRIGGER=1 php bin/run.php"

@@ -89,6 +89,19 @@ final class VisibilityMonitor
     }
 
     /**
+     * The earliest deadline still outstanding, or null if nothing can
+     * expire.
+     *
+     * A linear scan, unlike DelayedJobScheduler's O(1) answer, and that is
+     * fine: this set never holds more than one job per worker, so it is
+     * bounded by the pool size rather than by the queue depth.
+     */
+    public function nextDeadline(): ?float
+    {
+        return $this->deadlines === [] ? null : min($this->deadlines);
+    }
+
+    /**
      * Every job whose ACK is overdue, moved back to READY and dropped from
      * the monitor. The caller is responsible for actually returning them to
      * a queue - see JobDispatcher::requeueExpired().

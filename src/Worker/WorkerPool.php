@@ -125,10 +125,14 @@ final class WorkerPool
      * result, naming the job that was lost) and a crash while idle is not -
      * see maintain().
      *
-     * $block false polls and returns null if nothing is ready; true waits
-     * until something is.
+     * $timeout is in seconds: 0.0 polls, null waits indefinitely, anything
+     * else waits at most that long. With no busy worker to wait on it
+     * returns null at once whatever the timeout says - there is nothing
+     * that could arrive, so waiting for it would be a deadlock in the
+     * null case and a wasted sleep in the others. A caller that wants to
+     * idle for a while does its own sleeping.
      */
-    public function poll(bool $block = false): ?WorkerResult
+    public function poll(?float $timeout = 0.0): ?WorkerResult
     {
         $this->reap();
 
@@ -153,11 +157,15 @@ final class WorkerPool
 
             $write = null;
             $except = null;
-            $ready = @stream_select($read, $write, $except, $block ? null : 0);
+            $ready = @stream_select($read, $write, $except, ...self::selectTimeout($timeout));
+
             if ($ready === false || $ready === 0) {
-                if ($block) {
+                // Nothing yet. Only an indefinite wait goes round again;
+                // a bounded one has spent its budget.
+                if ($timeout === null) {
                     continue;
                 }
+
                 return null;
             }
 
@@ -166,16 +174,35 @@ final class WorkerPool
                 if ($worker === null) {
                     continue;
                 }
-                $outcome = $worker->collect(false);
+
+                // Already selected as readable, so this does not wait.
+                $outcome = $worker->collect(0.0);
                 if ($outcome !== null) {
                     return new WorkerResult($worker, $outcome);
                 }
             }
 
-            if (!$block) {
+            if ($timeout !== null) {
                 return null;
             }
         } while (true);
+    }
+
+    /**
+     * stream_select()'s timeout, split into seconds and microseconds, or
+     * [null] to block - see Worker::selectTimeout(), which this mirrors.
+     *
+     * @return array{0: ?int, 1?: int}
+     */
+    private static function selectTimeout(?float $timeout): array
+    {
+        if ($timeout === null) {
+            return [null];
+        }
+
+        $seconds = (int) $timeout;
+
+        return [$seconds, (int) (($timeout - $seconds) * 1_000_000)];
     }
 
     /** @return list<Worker> */

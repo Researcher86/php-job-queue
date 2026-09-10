@@ -86,6 +86,11 @@ final class InMemoryQueue implements Queue
         return $this->scheduler->size();
     }
 
+    public function nextDeadline(): ?float
+    {
+        return $this->scheduler->nextDeadline();
+    }
+
     /**
      * Rebuilds a queue from what storage remembers - PLAN.md Phase 12.
      *

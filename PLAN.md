@@ -1092,6 +1092,29 @@ This is one reason reliable queues usually provide:
 
 The same job may execute more than once.
 
+### Implementation
+
+`Timeout/VisibilityMonitor` holds the in-flight set and the deadlines.
+Tracking and expiry are separate: every dispatched job is tracked, and a
+null timeout only means nothing can become overdue - so the "processing"
+gauge is honest either way, and whether to reclaim jobs stays a matter of
+configuration.
+
+Nothing checks the deadlines on a timer of its own.
+`QueueRuntime::requeueExpired()` runs once per tick, and
+`nextDeadline()` is what lets the tick sleep until there is something to
+check.
+
+### Tests
+
+* [x] A tracked job counts as processing
+* [x] A job is not requeued before its deadline
+* [x] An expired job returns to READY
+* [x] Only expired jobs are requeued
+* [x] A released job is no longer processing
+* [x] A null timeout tracks without ever expiring
+* [x] An expired job is dispatched again end to end
+
 ---
 
 # Phase 10 — Dead Letter Queue
@@ -1593,6 +1616,67 @@ SIGKILL
 ```
 
 Unacknowledged jobs eventually return through visibility timeout.
+
+### Implementation
+
+`Master/QueueRuntime` is the long-running process, and the only thing in
+the project that knows how to stop. `JobDispatcher::drain()` runs until the
+work runs out, which is right for a script and wrong for a server: a
+delayed job due in ten minutes, or a job whose visibility timeout has not
+expired yet, is work that does not exist yet. A runtime waits for it.
+
+One tick:
+
+```text
+dispatch every free worker
+        ↓
+apply every answer that arrived
+        ↓
+reclaim jobs whose ACK went overdue
+        ↓
+wait
+```
+
+The wait is whichever comes first of a worker answering (`stream_select`
+wakes on it), the next deadline the runtime owns (`nextDeadline()`, no
+scanning), and `maxWait` - so a signal is never more than 50ms from being
+acted on. With no worker busy there is nothing to select on, so it is a
+plain sleep of the same length.
+
+SIGTERM and SIGINT only set a flag. Nothing is shut down from inside a
+signal handler, which is the only way to keep the order of the shutdown
+steps knowable. The loop notices on its next pass and leaves through
+`JobDispatcher::shutdown($grace)`:
+
+```text
+stop accepting  →  stop dispatching  →  busy workers finish
+        →  apply their results  →  tear the pool down
+```
+
+The grace period bounds the third step. When it runs out, the remaining
+workers are killed - `Worker::shutdown()` closes the socket first, which is
+how a worker between jobs exits by itself, and reaches for SIGKILL only for
+one still inside a handler. The jobs those workers were holding stay
+PROCESSING: never acknowledged, so they come back through the visibility
+timeout, or across a restart through the persistence log. A bounded
+shutdown is only safe because of that.
+
+Workers reset their inherited signal handlers on fork. Without it, a
+SIGTERM to the process group would run a runtime shutdown inside every
+worker.
+
+### Tests
+
+* [x] Ticks move jobs through to completion
+* [x] A delayed job is picked up once it comes due
+* [x] A real SIGTERM lets an in-flight job finish
+* [x] The grace period bounds the shutdown
+* [x] A job killed by the grace period returns through the visibility timeout
+* [x] Shutdown stops accepting new work
+* [x] A stop requested before `run()` is not lost
+
+Runnable by hand - `make run-worker`, then `pkill -TERM -f bin/worker.php`
+from another shell.
 
 ---
 

@@ -76,7 +76,7 @@ final class ChaosTest extends TestCase
         $replacement = $pool->getAvailableWorker();
         $this->assertNotNull($replacement);
         $replacement->assign(Job::create(type: 'after-crash'));
-        $result = $pool->poll(true);
+        $result = $pool->poll(null);
         $this->assertTrue($result?->getOutcome()->getResult()?->isSuccess());
 
         $pool->shutdown();
@@ -127,7 +127,7 @@ final class ChaosTest extends TestCase
         $worker->assign($job);
         posix_kill($worker->getPid(), SIGKILL);
 
-        $result = $pool->poll(true);
+        $result = $pool->poll(null);
         $this->assertNotNull($result);
         $this->assertNull($result->getOutcome()->getResult());
 
@@ -136,7 +136,7 @@ final class ChaosTest extends TestCase
         $recovered = $pool->getAvailableWorker();
         $this->assertNotNull($recovered);
         $recovered->assign($job);
-        $retried = $pool->poll(true);
+        $retried = $pool->poll(null);
         $this->assertNotNull($retried);
         $this->assertTrue($retried->getOutcome()->getResult()?->isSuccess());
 
@@ -230,7 +230,7 @@ final class ChaosTest extends TestCase
 
         usleep(150_000);
         posix_kill($worker->getPid(), SIGKILL);
-        $pool->poll(true);
+        $pool->poll(null);
 
         $countAfterFirst = (int) file_get_contents($counterFile);
         $this->assertSame(1, $countAfterFirst);
@@ -239,7 +239,7 @@ final class ChaosTest extends TestCase
         $recovered = $pool->getAvailableWorker();
         $this->assertNotNull($recovered);
         $recovered->assign($job);
-        $pool->poll(true);
+        $pool->poll(null);
 
         $countAfterSecond = (int) file_get_contents($counterFile);
         $this->assertSame(2, $countAfterSecond);
@@ -302,7 +302,7 @@ final class ChaosTest extends TestCase
         usleep(100_000);
 
         while ($pool->busyCount() > 0) {
-            $pool->poll(true);
+            $pool->poll(null);
         }
 
         $this->assertCount(2, $pool->getDeadWorkers());
@@ -317,7 +317,7 @@ final class ChaosTest extends TestCase
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
         $worker->assign($job3);
-        $result = $pool->poll(true);
+        $result = $pool->poll(null);
         $this->assertNotNull($result);
         $this->assertTrue($result->getOutcome()->getResult()?->isSuccess());
 
@@ -344,7 +344,7 @@ final class ChaosTest extends TestCase
 
             usleep(20_000);
             posix_kill($worker->getPid(), SIGKILL);
-            $pool->poll(true);
+            $pool->poll(null);
 
             $pool->replaceDeadWorkers();
         }

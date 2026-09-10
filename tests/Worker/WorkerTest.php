@@ -33,7 +33,7 @@ final class WorkerTest extends TestCase
 
         $job = Job::create(type: 'send_email');
         $worker->assign($job);
-        $outcome = $worker->collect(true);
+        $outcome = $worker->collect(null);
 
         $this->assertNotNull($outcome);
         $this->assertSame($job->getId()->toString(), $outcome->getJob()->getId()->toString());
@@ -51,7 +51,7 @@ final class WorkerTest extends TestCase
         $worker->spawn();
 
         $worker->assign(Job::create(type: 'test'));
-        $outcome = $worker->collect(true);
+        $outcome = $worker->collect(null);
 
         $this->assertNotNull($outcome);
         $result = $outcome->getResult();
@@ -74,7 +74,7 @@ final class WorkerTest extends TestCase
         $this->assertTrue($worker->isBusy());
         $this->assertSame($job->getId()->toString(), $worker->getCurrentJob()?->getId()->toString());
 
-        $worker->collect(true);
+        $worker->collect(null);
         $this->assertSame(WorkerState::IDLE, $worker->getState());
         $this->assertNull($worker->getCurrentJob());
 
@@ -113,7 +113,7 @@ final class WorkerTest extends TestCase
         $worker->assign($job);
         posix_kill($worker->getPid(), SIGKILL);
 
-        $outcome = $worker->collect(true);
+        $outcome = $worker->collect(null);
 
         $this->assertNotNull($outcome);
         $this->assertNull($outcome->getResult());
@@ -168,7 +168,7 @@ final class WorkerTest extends TestCase
         $this->assertFalse($worker->reap());
         $this->assertTrue($worker->isBusy());
 
-        $outcome = $worker->collect(true);
+        $outcome = $worker->collect(null);
         $this->assertNotNull($outcome);
         $this->assertNull($outcome->getResult());
         $this->assertSame('slow', $outcome->getJob()->getType());
@@ -226,7 +226,7 @@ final class WorkerTest extends TestCase
         $worker->assign(Job::create(type: 'test'));
         $worker->drain();
 
-        $outcome = $worker->collect(true);
+        $outcome = $worker->collect(null);
 
         $this->assertNotNull($outcome);
         $this->assertSame(WorkerState::STOPPING, $worker->getState());

@@ -96,4 +96,9 @@ final class PriorityQueue implements Queue
     {
         return $this->scheduler->size();
     }
+
+    public function nextDeadline(): ?float
+    {
+        return $this->scheduler->nextDeadline();
+    }
 }

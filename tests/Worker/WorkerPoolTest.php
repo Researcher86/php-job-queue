@@ -71,7 +71,7 @@ final class WorkerPoolTest extends TestCase
         $this->assertNotNull($worker);
         $worker->assign(Job::create(type: 'test'));
 
-        $result = $pool->poll(true);
+        $result = $pool->poll(null);
 
         $this->assertNotNull($result);
         $this->assertSame($worker->getId(), $pool->getAvailableWorker()?->getId());
@@ -99,7 +99,7 @@ final class WorkerPoolTest extends TestCase
         $w3->assign(Job::create(type: 'c'));
 
         $completed = 0;
-        while ($pool->poll(true) !== null) {
+        while ($pool->poll(null) !== null) {
             $completed++;
         }
 
@@ -121,7 +121,7 @@ final class WorkerPoolTest extends TestCase
         $worker->assign(Job::create(type: 'a'));
         posix_kill($worker->getPid(), SIGKILL);
 
-        $result = $pool->poll(true);
+        $result = $pool->poll(null);
         $this->assertNotNull($result);
         $this->assertNull($result->getOutcome()->getResult());
         $this->assertTrue($pool->hasDeadWorkers());
@@ -164,7 +164,7 @@ final class WorkerPoolTest extends TestCase
 
         $this->assertTrue($pool->isDraining());
 
-        $pool->poll(true);
+        $pool->poll(null);
         $this->assertTrue($pool->isDraining());
 
         $pool->shutdown();

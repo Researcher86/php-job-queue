@@ -480,7 +480,7 @@ final class JobDispatcherTest extends TestCase
         $worker->assign(Job::create(type: 'a'));
         posix_kill($worker->getPid(), SIGKILL);
 
-        $pool->poll(true);
+        $pool->poll(null);
         $pool->replaceDeadWorkers();
 
         $this->assertSame(1, $metrics->getCounter('worker_crashes'));
