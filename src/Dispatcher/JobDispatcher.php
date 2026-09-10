@@ -14,6 +14,7 @@ use App\Support\Clock;
 use App\Support\SystemClock;
 use App\Timeout\VisibilityMonitor;
 use App\Worker\Worker;
+use App\Worker\WorkerDiedException;
 use App\Worker\WorkerOutcome;
 use App\Worker\WorkerPool;
 use Throwable;
@@ -46,6 +47,8 @@ final class JobDispatcher
             return false;
         }
 
+        $this->workerPool->maintain();
+
         $worker = $this->workerPool->getAvailableWorker();
         if ($worker === null) {
             return false;
@@ -56,10 +59,9 @@ final class JobDispatcher
             return false;
         }
 
-        $job->markProcessing();
-        $this->monitor->track($job);
-        $this->recordStart($job);
-        $worker->assign($job);
+        if (!$this->dispatch($worker, $job)) {
+            return false;
+        }
 
         $result = $this->workerPool->poll(true);
         if ($result !== null) {
@@ -76,17 +78,17 @@ final class JobDispatcher
 
         try {
             while (true) {
+                $this->workerPool->maintain();
+
                 while (($worker = $this->workerPool->getAvailableWorker()) !== null) {
                     $job = $this->queue->pop();
                     if ($job === null) {
                         break;
                     }
 
-                    $job->markProcessing();
-                    $this->monitor->track($job);
-                    $this->recordStart($job);
-                    $worker->assign($job);
-                    $dispatched++;
+                    if ($this->dispatch($worker, $job)) {
+                        $dispatched++;
+                    }
                 }
 
                 $result = $this->workerPool->poll();
@@ -144,6 +146,43 @@ final class JobDispatcher
         }
 
         $this->workerPool->shutdown();
+    }
+
+    /**
+     * Hands one job to one worker, and returns whether it got there.
+     *
+     * The order matters and is the invariant of PLAN.md Phase 5: the job is
+     * marked PROCESSING and registered with the visibility monitor BEFORE
+     * it is written to the socket, so there is no instant at which the job
+     * is neither in the queue nor accounted for as in flight. A job must
+     * not be able to fall between the two.
+     *
+     * If the worker turns out to be dead (killed while idle, too recently
+     * for maintain() to have noticed), the job comes straight back to the
+     * queue and this returns false. The attempt it consumed is not given
+     * back: an attempt in this system counts a DELIVERY, not a successful
+     * run, which is the same accounting the visibility timeout uses when it
+     * requeues a job whose worker vanished. Real queues count receipts too.
+     */
+    private function dispatch(Worker $worker, Job $job): bool
+    {
+        $job->markProcessing();
+        $this->monitor->track($job);
+        $this->recordStart($job);
+
+        try {
+            $worker->assign($job);
+        } catch (WorkerDiedException) {
+            $this->monitor->release($job);
+            $this->takeStart($job, $this->clock->now());
+            $job->markRetry($this->clock->now());
+            $this->queue->push($job);
+            $this->workerPool->maintain();
+
+            return false;
+        }
+
+        return true;
     }
 
     private function applyResult(Worker $worker, WorkerOutcome $outcome): void

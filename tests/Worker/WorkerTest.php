@@ -6,6 +6,7 @@ namespace App\Tests\Worker;
 
 use App\Job\Job;
 use App\Worker\Worker;
+use App\Worker\WorkerDiedException;
 use App\Worker\WorkerState;
 use LogicException;
 use PHPUnit\Framework\TestCase;
@@ -122,6 +123,75 @@ final class WorkerTest extends TestCase
         $worker->shutdown();
     }
 
+    public function testReapNoticesAWorkerThatDiedWhileIdle(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->spawn();
+        $this->assertTrue($worker->isAvailable());
+
+        posix_kill($worker->getPid(), SIGKILL);
+        $this->waitForExit($worker->getPid());
+
+        $this->assertTrue($worker->reap());
+        $this->assertTrue($worker->isDead());
+        // Idempotent: the second call has nothing left to find.
+        $this->assertFalse($worker->reap());
+    }
+
+    public function testReapLeavesALiveWorkerAlone(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->spawn();
+
+        $this->assertFalse($worker->reap());
+        $this->assertTrue($worker->isAvailable());
+
+        $worker->shutdown();
+    }
+
+    /**
+     * A busy worker's death belongs to poll()/collect(), which is the only
+     * path that knows which job went down with it. reap() must not get
+     * there first and swallow the job.
+     */
+    public function testReapIgnoresABusyWorker(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {
+            usleep(100_000);
+        });
+        $worker->spawn();
+        $worker->assign(Job::create(type: 'slow'));
+
+        posix_kill($worker->getPid(), SIGKILL);
+        $this->waitForExit($worker->getPid());
+
+        $this->assertFalse($worker->reap());
+        $this->assertTrue($worker->isBusy());
+
+        $outcome = $worker->collect(true);
+        $this->assertNotNull($outcome);
+        $this->assertNull($outcome->getResult());
+        $this->assertSame('slow', $outcome->getJob()->getType());
+
+        $worker->shutdown();
+    }
+
+    public function testAssignToAWorkerKilledWhileIdleReportsItsDeath(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->spawn();
+
+        posix_kill($worker->getPid(), SIGKILL);
+        $this->waitForExit($worker->getPid());
+
+        try {
+            $worker->assign(Job::create(type: 'a'));
+            $this->fail('Expected the assign to report a dead worker');
+        } catch (WorkerDiedException) {
+            $this->assertTrue($worker->isDead());
+        }
+    }
+
     public function testWorkerGetId(): void
     {
         $worker = new Worker(7, static function (Job $job): void {});
@@ -163,5 +233,12 @@ final class WorkerTest extends TestCase
         $this->assertTrue($worker->isDraining());
 
         $worker->shutdown();
+    }
+
+    private function waitForExit(int $pid): void
+    {
+        for ($i = 0; $i < 200 && posix_kill($pid, 0); $i++) {
+            usleep(5_000);
+        }
     }
 }

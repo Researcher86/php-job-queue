@@ -9,10 +9,26 @@ use App\Metrics\MetricsCollector;
 use Closure;
 use InvalidArgumentException;
 
+/**
+ * The fixed set of worker processes, and everything the Master side needs
+ * to know about them: which one is free, which one answered, which one
+ * died.
+ *
+ * Size is fixed on purpose. Autoscaling is a php-worker-pool concern; here
+ * the interesting question is what happens to a JOB when a worker
+ * disappears, and a constant pool size makes that easier to watch.
+ */
 final class WorkerPool
 {
     /** @var list<Worker> */
     private array $workers = [];
+
+    /**
+     * Set once drain() has been called. What stops maintain() from
+     * cheerfully forking a replacement for a worker that died while the
+     * whole pool was on its way out.
+     */
+    private bool $draining = false;
 
     /**
      * @param Closure(Job): mixed $handler
@@ -63,8 +79,59 @@ final class WorkerPool
         return $count;
     }
 
+    /**
+     * Collects worker deaths that poll() cannot see, then restores the lost
+     * capacity. Returns how many workers were replaced.
+     *
+     * The two halves answer different questions: reap() notices a worker
+     * that died while idle (see Worker::reap() for why only idle),
+     * replaceDeadWorkers() forks a new process to take its place. A caller
+     * that only wants to know, without replacing, calls reap() itself.
+     *
+     * Meant to be called once per loop iteration - it costs one non-blocking
+     * waitpid per idle worker.
+     */
+    public function maintain(): int
+    {
+        $this->reap();
+
+        return $this->replaceDeadWorkers();
+    }
+
+    /**
+     * Non-blocking check for workers that died while not holding a job.
+     * Returns how many this call found.
+     */
+    public function reap(): int
+    {
+        $reaped = 0;
+
+        foreach ($this->workers as $worker) {
+            if ($worker->reap()) {
+                $reaped++;
+            }
+        }
+
+        return $reaped;
+    }
+
+    /**
+     * Waits for one worker to answer, and reports which worker answered
+     * with what.
+     *
+     * Only BUSY workers are selected on: an idle worker's socket has
+     * nothing coming. That is also why a crash while busy is detected here
+     * (the socket reaches EOF, and collect() returns an outcome with a null
+     * result, naming the job that was lost) and a crash while idle is not -
+     * see maintain().
+     *
+     * $block false polls and returns null if nothing is ready; true waits
+     * until something is.
+     */
     public function poll(bool $block = false): ?WorkerResult
     {
+        $this->reap();
+
         do {
             $read = [];
             $streamWorkers = [];
@@ -136,8 +203,23 @@ final class WorkerPool
         return $this->getDeadWorkers() !== [];
     }
 
+    /**
+     * Forks a replacement for every DEAD worker, in place, keeping the pool
+     * at its configured size. Returns how many were replaced.
+     *
+     * Each replacement counts as a worker crash: the counter is what tells
+     * "the workers keep dying" apart from "the jobs keep failing", which
+     * are different problems with different fixes.
+     *
+     * A pool that is draining replaces nothing - the workers are supposed
+     * to be leaving.
+     */
     public function replaceDeadWorkers(): int
     {
+        if ($this->draining) {
+            return 0;
+        }
+
         $replaced = 0;
         foreach ($this->workers as $i => $worker) {
             if (!$worker->isDead()) {
@@ -157,6 +239,8 @@ final class WorkerPool
 
     public function drain(): void
     {
+        $this->draining = true;
+
         foreach ($this->workers as $worker) {
             $worker->drain();
         }

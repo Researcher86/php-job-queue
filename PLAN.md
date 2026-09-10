@@ -1221,13 +1221,34 @@ READY
 
 > A worker crash must not permanently lose a job.
 
+### Two crashes, two detection paths
+
+A worker that dies while **busy** is found by the poll loop: its socket
+reaches EOF, `Worker::collect()` reports an outcome with a null result, and
+that outcome names the job that went down with it. This path has to stay the
+one that handles a busy crash, because it is the only one that knows which
+job was lost.
+
+A worker that dies while **idle** is invisible to that loop - nothing is
+selecting on its socket, because nothing is coming. It used to stay
+invisible until the pool handed it a job and the write to a dead socket
+threw, which killed the dispatch loop and left the job in limbo.
+`WorkerPool::maintain()` closes that gap with a non-blocking `waitpid` per
+idle worker, and `Worker::assign()` now reports the race it cannot avoid as
+`WorkerDiedException`, which the dispatcher answers by putting the job back.
+
+DRAINING and STOPPING workers are skipped by the reaper on purpose: those
+are leaving because we told them to, and counting a deliberate shutdown as
+a crash would make the crash counter useless.
+
 ### Tests
 
-* [ ] Kill worker while idle
-* [ ] Kill worker while busy
+* [x] Kill worker while idle
+* [x] Kill worker while busy
 * [x] Worker is replaced
 * [x] Job returns to queue
 * [x] Job can execute again
+* [x] Reaper leaves live and busy workers alone
 
 ---
 

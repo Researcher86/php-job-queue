@@ -87,6 +87,16 @@ final class Worker
         $this->apply('start');
     }
 
+    /**
+     * Hands the job to the worker process, over the socket, as JSON.
+     *
+     * Throws WorkerDiedException if the process is already gone - killed
+     * while it sat IDLE, and killed recently enough that nothing has
+     * reaped it yet. The write to a socket whose peer is dead is where we
+     * find out. The worker is marked DEAD here so it stops being handed
+     * work, and the caller still owns the job: see
+     * JobDispatcher::dispatch(), which puts it back.
+     */
     public function assign(Job $job): void
     {
         if ($this->state !== WorkerState::IDLE) {
@@ -94,11 +104,62 @@ final class Worker
         }
 
         $payload = json_encode($job->toArray(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
-        self::writeAll($this->stream, $payload);
+
+        try {
+            self::writeAll($this->stream, $payload);
+        } catch (RuntimeException $e) {
+            $this->apply('die');
+
+            throw new WorkerDiedException(
+                sprintf('Worker %d (pid %d) died before it could be given a job', $this->id, $this->pid),
+                previous: $e,
+            );
+        }
 
         $this->currentJob = $job;
         $this->assignedAt = microtime(true);
         $this->apply('assign');
+    }
+
+    /**
+     * Notices a worker that died while it was NOT holding a job, without
+     * blocking. Returns whether this call is what found it.
+     *
+     * Only IDLE and STARTING are checked, and that division is the whole
+     * design:
+     *
+     *   - A worker that dies while BUSY is already detected, with its job,
+     *     by WorkerPool::poll() - the socket reaches EOF, collect() reports
+     *     an outcome with a null result, and the dispatcher requeues. That
+     *     path must stay the one that handles it, because it is the only
+     *     one that knows which job was lost.
+     *   - A worker that dies while idle has no job and no reader waiting on
+     *     its socket. Nothing selects on it, so nothing notices - until it
+     *     is handed work and the write fails. This is what closes that gap.
+     *   - DRAINING and STOPPING are skipped deliberately: those processes
+     *     are leaving because WE told them to. Reaping them here would
+     *     count a deliberate shutdown as a crash.
+     */
+    public function reap(): bool
+    {
+        if ($this->pid <= 0) {
+            return false;
+        }
+
+        if ($this->state !== WorkerState::IDLE && $this->state !== WorkerState::STARTING) {
+            return false;
+        }
+
+        // 0 means "still running". A pid means it just exited and we have
+        // now collected it; -1 means it is not our child any more, which
+        // for a worker we forked ourselves also means it is gone.
+        if (pcntl_waitpid($this->pid, $status, WNOHANG) === 0) {
+            return false;
+        }
+
+        $this->apply('die');
+
+        return true;
     }
 
     public function collect(bool $block = false): ?WorkerOutcome

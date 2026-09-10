@@ -7,6 +7,7 @@ namespace App\Tests\Chaos;
 use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
+use App\Job\JobState;
 use App\Persistence\InMemoryStorage;
 use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
@@ -42,6 +43,69 @@ final class ChaosTest extends TestCase
         $dispatcher->drain();
 
         $this->assertSame(10, $dlq->size());
+        $this->assertSame(0, $queue->size());
+    }
+
+    /**
+     * PLAN.md Phase 11: "Kill worker while idle".
+     *
+     * Nobody is selecting on an idle worker's socket, so this death is
+     * invisible until something goes looking - which is what maintain()
+     * is for.
+     */
+    public function testIdleWorkerCrashIsNoticedAndReplaced(): void
+    {
+        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool->start();
+
+        $idle = $pool->getAvailableWorker();
+        $this->assertNotNull($idle);
+        $this->assertTrue($idle->isAvailable());
+
+        posix_kill($idle->getPid(), SIGKILL);
+        $this->waitForExit($idle->getPid());
+
+        // Nothing has looked yet, so nothing knows.
+        $this->assertFalse($pool->hasDeadWorkers());
+
+        $this->assertSame(1, $pool->maintain());
+        $this->assertFalse($pool->hasDeadWorkers());
+        $this->assertSame(2, $pool->count());
+
+        // And the replacement is a usable worker, not just a slot.
+        $replacement = $pool->getAvailableWorker();
+        $this->assertNotNull($replacement);
+        $replacement->assign(Job::create(type: 'after-crash'));
+        $result = $pool->poll(true);
+        $this->assertTrue($result?->getOutcome()->getResult()?->isSuccess());
+
+        $pool->shutdown();
+    }
+
+    /**
+     * PLAN.md Phase 11, the same kill through the dispatcher: an idle
+     * worker dies, and the job dispatched to it is not lost - not to the
+     * crash, and not to an exception escaping the dispatch loop either.
+     */
+    public function testJobSurvivesDispatchToAWorkerKilledWhileIdle(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool->start();
+
+        $idle = $pool->getAvailableWorker();
+        $this->assertNotNull($idle);
+        posix_kill($idle->getPid(), SIGKILL);
+        $this->waitForExit($idle->getPid());
+
+        $job = Job::create(type: 'important', clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $dispatcher->drain();
+
+        $this->assertSame(JobState::COMPLETED, $job->getState());
         $this->assertSame(0, $queue->size());
     }
 
@@ -374,5 +438,16 @@ final class ChaosTest extends TestCase
 
         $pool->shutdown();
         @unlink($completedFile);
+    }
+
+    /**
+     * Waits until the process is actually gone. posix_kill only delivers
+     * the signal; without this the test races the kernel.
+     */
+    private function waitForExit(int $pid): void
+    {
+        for ($i = 0; $i < 200 && posix_kill($pid, 0); $i++) {
+            usleep(5_000);
+        }
     }
 }
