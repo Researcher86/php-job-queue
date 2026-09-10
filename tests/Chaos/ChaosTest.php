@@ -8,6 +8,7 @@ use App\Dispatcher\JobDispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
 use App\Job\JobState;
+use App\Metrics\MetricsCollector;
 use App\Persistence\InMemoryStorage;
 use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
@@ -161,6 +162,63 @@ final class ChaosTest extends TestCase
         $dispatcher->drain();
 
         $this->assertSame(0, $restored->size());
+    }
+
+    /**
+     * PLAN.md Phase 16's slow job, and the thing it actually breaks: a
+     * handler that takes longer than the visibility timeout gets its job
+     * handed to a SECOND worker while the first is still working on it.
+     *
+     * That is not the handler misbehaving, it is the timeout being too
+     * short - see PLAN.md's engineering question 2, request timeout versus
+     * visibility timeout. And the consequence is a duplicate execution
+     * with nothing crashed and nothing failing, which is the version of
+     * at-least-once delivery that surprises people.
+     */
+    public function testAHandlerSlowerThanTheVisibilityTimeoutRunsTwice(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $runFile = tempnam(sys_get_temp_dir(), 'slow-');
+        $pool = new WorkerPool(2, static function (Job $job) use ($runFile): void {
+            file_put_contents($runFile, getmypid() . "\n", FILE_APPEND);
+            usleep(150_000);
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'slow', maxAttempts: 5, clock: $clock);
+        $queue->push($job);
+
+        $metrics = new MetricsCollector();
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 1, metrics: $metrics);
+
+        // Out it goes to the first worker, which will be busy for 150ms.
+        $this->assertTrue($dispatcher->dispatchPending() > 0);
+        $this->assertTrue($dispatcher->isProcessing($job));
+
+        // The deadline passes while it is still working. Nothing has gone
+        // wrong; the queue simply has no way to know that.
+        $clock->advance(2.0);
+        $this->assertSame(1, $dispatcher->requeueExpired());
+        $this->assertSame(JobState::READY, $job->getState());
+
+        // And so it is dispatched again - to the other worker, while the
+        // first one is still running it.
+        $this->assertTrue($dispatcher->dispatchPending() > 0);
+
+        $dispatcher->shutdown(2.0);
+
+        $pids = array_filter(explode("\n", (string) file_get_contents($runFile)));
+        @unlink($runFile);
+
+        $this->assertCount(2, $pids, 'the same job ran twice');
+        $this->assertCount(2, array_unique($pids), 'in two different workers');
+        $this->assertSame(2, $job->getAttempts());
+        $this->assertSame(JobState::COMPLETED, $job->getState());
+
+        // The first worker's answer arrived for a delivery nobody was
+        // waiting for any more, and was counted rather than applied.
+        $this->assertSame(1, $metrics->getCounter(MetricsCollector::STALE_ACKS));
     }
 
     public function testSlowJobsDoNotBreakTheQueue(): void

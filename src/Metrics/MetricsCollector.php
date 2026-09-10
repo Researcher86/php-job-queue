@@ -43,6 +43,18 @@ final class MetricsCollector
     public const string JOBS_DEAD_LETTERED = 'dlq';
     public const string WORKER_CRASHES = 'worker_crashes';
 
+    /**
+     * Answers that arrived for a job the queue had already resolved -
+     * because a visibility timeout expired while the handler was still
+     * running, or because a job was requeued and finished twice.
+     *
+     * The observable evidence of duplicate delivery, and the one counter
+     * here that is a question rather than a fact: a stale ACK is not an
+     * error, but a rising count means the visibility timeout is shorter
+     * than the work it is timing.
+     */
+    public const string STALE_ACKS = 'stale_acks';
+
     public const string LATENCY_QUEUE_WAIT = 'queue_wait';
     public const string LATENCY_EXECUTION = 'execution';
     public const string LATENCY_END_TO_END = 'end_to_end';

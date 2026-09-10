@@ -1,6 +1,7 @@
 .PHONY: install test analyse lint fix run up down build shell \
         docker-install docker-test docker-analyse docker-lint docker-fix \
-        docker-run docker-run-worker docker-run-debug run-worker
+        docker-run docker-run-worker docker-run-debug run-worker \
+        bench docker-bench example docker-example
 
 install:
 	composer install
@@ -25,6 +26,15 @@ run:
 # graceful shutdown: `docker compose exec php pkill -TERM -f bin/worker.php`
 run-worker:
 	php bin/worker.php
+
+# make bench ARGS="10000 8"  -> <jobs> <workers> <work-microseconds>
+bench:
+	php bin/bench.php $(ARGS)
+
+# One mechanism at a time: basic-job, failed-job, delayed-job,
+# worker-crash, priority-jobs.
+example:
+	php examples/$(EXAMPLE).php
 
 up:
 	docker compose up -d
@@ -58,6 +68,12 @@ docker-run: up
 
 docker-run-worker: up
 	docker compose exec php php bin/worker.php
+
+docker-bench: up
+	docker compose exec php php bin/bench.php $(ARGS)
+
+docker-example: up
+	docker compose exec php php examples/$(EXAMPLE).php
 
 docker-run-debug: up
 	docker compose exec php bash -c "XDEBUG_TRIGGER=1 php bin/run.php"

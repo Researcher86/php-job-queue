@@ -35,6 +35,68 @@ final class StressTest extends TestCase
         $this->assertSame(0, $queue->size());
     }
 
+    /**
+     * PLAN.md Phase 16 asks for 10,000 as well. It runs in about half a
+     * second, so it stays in the suite; 100,000 is bin/bench.php's job -
+     * it takes eight seconds and 96MB, which is a measurement, not a test.
+     *
+     * What it actually guards is that nothing in the pipeline is O(n^2) in
+     * queue depth. The delayed set is a heap and the ready set is an array
+     * used as a FIFO; a regression to a sorted-on-every-push list would
+     * show up here as a timeout rather than as a wrong answer.
+     */
+    public function testTenThousandJobsCompleteWithoutDegrading(): void
+    {
+        $metrics = new MetricsCollector();
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(8, static function (Job $job): void {});
+        $pool->start();
+
+        for ($i = 0; $i < 10_000; $i++) {
+            $queue->push(Job::create(type: 'bulk', clock: $clock));
+        }
+
+        $startedAt = microtime(true);
+        $dispatched = (new JobDispatcher($queue, $pool, clock: $clock, metrics: $metrics))->drain();
+        $elapsed = microtime(true) - $startedAt;
+
+        $this->assertSame(10_000, $dispatched);
+        $this->assertSame(10_000, $metrics->getCounter(MetricsCollector::JOBS_COMPLETED));
+        $this->assertSame(0, $queue->size());
+        $this->assertLessThan(10.0, $elapsed, 'throughput collapsed');
+    }
+
+    /**
+     * The same depth, all of it delayed and released at once: the heap's
+     * insert path under load, and the ordering it promises at the far end
+     * of it.
+     */
+    public function testTenThousandDelayedJobsComeBackInDeadlineOrder(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+
+        // Pushed in reverse deadline order, so nothing about the result can
+        // be explained by insertion order.
+        for ($i = 10_000; $i > 0; $i--) {
+            $queue->push(Job::create(type: "job-$i", clock: $clock), delay: $i);
+        }
+
+        $this->assertSame(10_000, $queue->delayedSize());
+        $this->assertSame(1_001.0, $queue->nextDeadline());
+
+        $clock->advance(10_001.0);
+
+        for ($i = 1; $i <= 10_000; $i++) {
+            $job = $queue->pop();
+            $this->assertNotNull($job);
+            $this->assertSame("job-$i", $job->getType(), 'out of deadline order');
+        }
+
+        $this->assertSame(0, $queue->size());
+    }
+
     public function testThousandJobsWithMetricsStayConsistent(): void
     {
         $metrics = new MetricsCollector();

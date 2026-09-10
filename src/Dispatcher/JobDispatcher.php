@@ -6,6 +6,7 @@ namespace App\Dispatcher;
 
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
+use App\Job\JobState;
 use App\Metrics\MetricsCollector;
 use App\Metrics\QueueMetrics;
 use App\Persistence\JobStorage;
@@ -355,6 +356,23 @@ final class JobDispatcher
     private function applyResult(Worker $worker, WorkerOutcome $outcome): void
     {
         $job = $outcome->getJob();
+
+        // A late answer for a job the queue has already resolved. It
+        // happens without anything going wrong: the visibility timeout
+        // expired while the handler was still running, the job was handed
+        // to a second worker, and now the first one has finished and is
+        // reporting on a delivery nobody is waiting for any more.
+        //
+        // Ignored rather than applied, and deliberately without releasing
+        // the monitor: what it tracks under this job's id is the LIVE
+        // delivery, and releasing here would leave that one untracked -
+        // turning a harmless duplicate into a genuinely lost job.
+        if ($job->getState() !== JobState::PROCESSING) {
+            $this->metrics?->increment(MetricsCollector::STALE_ACKS);
+
+            return;
+        }
+
         $result = $outcome->getResult();
         $this->monitor->release($job);
 

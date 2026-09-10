@@ -1368,6 +1368,9 @@ This is an excellent educational exercise.
 * [x] Ready jobs restored
 * [x] Delayed jobs restored
 * [x] Processing jobs handled correctly after restart
+* [x] Completed jobs are not restored - a finished job is not work
+* [x] An idempotency key survives a restart, so a redelivered job's side
+      effect still happens only once
 
 ---
 
@@ -1777,6 +1780,44 @@ Attempt 2 ❌
 Attempt 3 ❌
 DLQ
 ```
+
+---
+
+## What was built
+
+**Stress** — `bin/bench.php <jobs> <workers> <work-microseconds>`, and two
+depths kept in the suite (1,000 and 10,000). 100,000 stays in the bench
+rather than the tests, because eight seconds and 96MB is a measurement, not
+an assertion. Measured on the 8.5-cli image, no-op handlers, 8 workers:
+
+| jobs | drained in | throughput | peak memory | queue wait (avg) | execution (avg) |
+|--------:|-----------:|-----------:|------------:|-----------------:|----------------:|
+| 1,000 | 0.055s | 18,000/s | 4 MB | 23 ms | 0.08 ms |
+| 10,000 | 0.416s | 24,000/s | 12 MB | 215 ms | 0.14 ms |
+| 100,000 | 8.368s | 12,000/s | 96 MB | 5,129 ms | 0.30 ms |
+
+Which is Phase 14's insight as a table: at 100,000 jobs the average job took
+five seconds and the average handler took a third of a millisecond. The jobs
+were not slow. They were queued.
+
+**Chaos** — all four scenarios, as tests:
+
+* [x] Kill a worker while busy → replaced, job returns, job runs again
+* [x] Kill a worker while idle → noticed by the reaper, replaced
+* [x] Crash the queue process → state rebuilt from the log, PROCESSING jobs
+      return to READY
+* [x] Slow job → the visibility timeout expires mid-handler and the job runs
+      twice, in two different workers, with nothing broken
+* [x] Always-failing job → attempts exhausted → DLQ
+* [x] Duplicate execution before ACK → the same job charged only once,
+      because the handler is idempotent
+
+The slow-job test found a real bug: the second worker's answer arrived for a
+job the first had already completed, and `markCompleted()` threw out of the
+dispatch loop. A late answer is now counted (`stale_acks`) and ignored -
+without releasing the visibility monitor, since what it tracks under that
+job's id is the live delivery, and releasing it there would have turned a
+harmless duplicate into a genuinely lost job.
 
 ---
 
