@@ -125,7 +125,21 @@ final class Worker
 
     private const int EXIT_POLL_INTERVAL_US = 1_000;
 
-    /** @var list<resource> */
+    /**
+     * Every socket end this process still holds, across all workers - so a
+     * newly forked child can close the ones that belong to its siblings.
+     *
+     * It has to be static: a child inherits every fd its parent had open,
+     * including both ends of every OTHER worker's socket pair, and a socket
+     * kept open by a third process never reaches EOF at the far end. That
+     * would break crash detection for every worker forked before this one.
+     *
+     * Pruned on each spawn (see closeInheritedStreams). A long-running
+     * runtime that keeps replacing crashed workers would otherwise
+     * accumulate one dead entry per replacement, forever.
+     *
+     * @var list<resource>
+     */
     private static array $allStreams = [];
 
     private WorkerState $state = WorkerState::STARTING;
@@ -135,6 +149,18 @@ final class Worker
     private mixed $stream = null;
 
     private int $pid = 0;
+
+    /**
+     * The pid of the process that forked this worker, so the destructor can
+     * tell whether it is running in that process.
+     *
+     * It matters because a fork inherits every object the parent had. When
+     * a worker child exits, PHP runs destructors for the Worker objects of
+     * every SIBLING worker too - and those pids are not its children. Left
+     * unguarded, a child's exit would run reaping and possibly signalling
+     * against processes it has no business touching.
+     */
+    private int $ownerPid = 0;
 
     public function __construct(
         private readonly int $id,
@@ -152,6 +178,7 @@ final class Worker
             throw new RuntimeException('Failed to create worker socket pair');
         }
         [$parent, $child] = $pair;
+        self::$allStreams = array_values(array_filter(self::$allStreams, 'is_resource'));
         self::$allStreams[] = $parent;
         self::$allStreams[] = $child;
 
@@ -169,22 +196,35 @@ final class Worker
             pcntl_signal(SIGTERM, SIG_DFL);
             pcntl_signal(SIGINT, SIG_DFL);
 
-            // The pipes belonging to workers forked before this one. The
-            // child has no business holding them open, and a socket kept
-            // alive by a third process never reaches EOF at the other end.
+            // The pipes belonging to workers forked before this one - see
+            // $allStreams.
             foreach (self::$allStreams as $resource) {
                 if ($resource !== $child && is_resource($resource)) {
                     fclose($resource);
                 }
             }
 
-            $this->workerLoop($child);
-            exit(0);
+            // The child MUST NOT return from here under any circumstance.
+            // If it did, it would carry on executing whatever the parent
+            // was in the middle of - as a second copy of the parent
+            // process, with the parent's stack. That is not a theoretical
+            // risk: workerLoop()'s final write throws when the parent has
+            // closed its end, which is exactly what happens when a worker
+            // is shut down mid-job, and it used to let the exception
+            // propagate out of spawn() into the application.
+            try {
+                $this->workerLoop($child);
+                exit(0);
+            } catch (Throwable $e) {
+                fwrite(STDERR, sprintf("worker %d died: %s\n", $this->id, $e->getMessage()));
+                exit(1);
+            }
         }
 
         fclose($child);
         $this->stream = $parent;
         $this->pid = $pid;
+        $this->ownerPid = posix_getpid();
         $this->apply('start');
     }
 
@@ -460,6 +500,27 @@ final class Worker
     }
 
     /**
+     * Last resort: a worker that goes out of scope without shutdown() must
+     * not leave its process behind.
+     *
+     * Without this, the child outlives its handle - it sits blocked on a
+     * read until the parent exits and the socket closes, then exits itself
+     * with nobody left to reap it. It is re-parented to init and, if init
+     * is not an init (a `php -a` as pid 1, say), stays a zombie forever.
+     * WorkerPool has always had this; a Worker created directly did not.
+     *
+     * Guarded by $ownerPid: in a forked child, this object and every
+     * sibling's belong to a process that is not their owner, and none of
+     * them should be acted on there.
+     */
+    public function __destruct()
+    {
+        if ($this->ownerPid === posix_getpid()) {
+            $this->shutdown();
+        }
+    }
+
+    /**
      * Polls waitpid until the process is gone or the budget runs out.
      * Returns whether it exited (and was reaped) in time.
      */
@@ -480,6 +541,15 @@ final class Worker
         }
     }
 
+    /**
+     * The child's whole life: read a job, run the handler, write the
+     * result, repeat until the socket closes.
+     *
+     * Returns only on a clean end - EOF from the parent, or a parent that
+     * has gone away mid-answer. spawn() turns any other exit from here into
+     * exit(1), because a return into the caller's stack would make this
+     * process a second copy of the parent.
+     */
     private function workerLoop(mixed $stream): void
     {
         while (true) {
@@ -514,7 +584,18 @@ final class Worker
             }
 
             $response = json_encode($this->encodeResult($result), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
-            self::writeAll($stream, $response);
+
+            try {
+                self::writeAll($stream, $response);
+            } catch (RuntimeException) {
+                // The parent closed its end while we were working - a
+                // shutdown that ran out of grace, or a crashed runtime.
+                // There is nobody to report to, and nothing to save: the
+                // job is unacknowledged, so it comes back through the
+                // visibility timeout. Leaving is the whole of the right
+                // behaviour here.
+                return;
+            }
         }
     }
 

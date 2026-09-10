@@ -241,4 +241,68 @@ final class WorkerTest extends TestCase
             usleep(5_000);
         }
     }
+
+    /**
+     * A worker that goes out of scope takes its process with it. Without a
+     * destructor the child outlived its handle, exited when the parent did,
+     * and was left unreaped - which is how a test suite accumulates
+     * zombies.
+     */
+    public function testAWorkerGoingOutOfScopeLeavesNoProcessBehind(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {});
+        $worker->spawn();
+        $pid = $worker->getPid();
+
+        $this->assertTrue(posix_kill($pid, 0), 'the worker process is running');
+
+        unset($worker);
+
+        $this->waitForExit($pid);
+
+        $this->assertFalse(posix_kill($pid, 0), 'the worker process is gone');
+        // And reaped: waitpid finds nothing left to collect.
+        $this->assertSame(-1, pcntl_waitpid($pid, $status, WNOHANG));
+    }
+
+    /**
+     * The worst failure this class can have: a child that RETURNS from
+     * spawn() carries on executing whatever the parent was doing, as a
+     * second copy of the parent process.
+     *
+     * It used to happen on an ordinary path. workerLoop()'s final write
+     * throws when the parent has closed its end - which is what a shutdown
+     * mid-job does - and the exception propagated out of spawn() into the
+     * caller's stack. In this test suite that produced a second PHPUnit
+     * process, which went on to fork workers of its own.
+     *
+     * The assertion is that the child exits promptly. An escaped child
+     * would still be running whatever came next, and would not.
+     */
+    public function testAWorkerWhoseParentClosedMidJobExitsInsteadOfEscaping(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {
+            usleep(150_000);
+        });
+        $worker->spawn();
+        $pid = $worker->getPid();
+
+        $worker->assign(Job::create(type: 'slow'));
+
+        // Close our end while the handler is still running: the child's
+        // write will fail when it finishes.
+        $worker->terminate();
+
+        $exited = false;
+        for ($i = 0; $i < 400; $i++) {
+            if (pcntl_waitpid($pid, $status, WNOHANG) !== 0) {
+                $exited = true;
+                break;
+            }
+
+            usleep(10_000);
+        }
+
+        $this->assertTrue($exited, 'the worker process escaped instead of exiting');
+    }
 }

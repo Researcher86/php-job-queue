@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace App\Tests\Persistence;
 
+use App\Job\Job;
 use App\Persistence\FileStorage;
+use App\Queue\InMemoryQueue;
+use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 
@@ -95,5 +98,29 @@ final class FileStorageTest extends TestCase
         $this->expectExceptionMessage('Corrupt record on line 1');
 
         (new FileStorage($this->path))->load();
+    }
+
+    /**
+     * A restart must not rewrite the log it just read. It used to: every
+     * restored job was pushed, and every push appends, so each restart
+     * added a full copy of the log to it.
+     */
+    public function testRestoringDoesNotAppendACopyOfTheLog(): void
+    {
+        $storage = new FileStorage($this->path);
+        $queue = new InMemoryQueue(new FakeClock(1000.0), $storage);
+        $queue->push(Job::create(type: 'a'));
+        $queue->push(Job::create(type: 'b'), delay: 60);
+
+        $linesBefore = count(file($this->path) ?: []);
+
+        $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(1000.0));
+
+        $this->assertSame(2, $restored->size());
+        $this->assertSame($linesBefore, count(file($this->path) ?: []));
+
+        // Storage is still attached, so new work is still logged.
+        $restored->push(Job::create(type: 'c'));
+        $this->assertSame($linesBefore + 1, count(file($this->path) ?: []));
     }
 }

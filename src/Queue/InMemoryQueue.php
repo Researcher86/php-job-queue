@@ -94,7 +94,13 @@ final class InMemoryQueue implements Queue
      */
     public static function restoreFromStorage(JobStorage $storage, ?Clock $clock = null): self
     {
-        $queue = new self($clock, $storage);
+        // Replayed with no storage attached, then attached afterwards: a
+        // push() writes, and writing back every job we just read would add
+        // a full copy of the log on every restart. Nothing is lost by
+        // waiting - a job restored as READY that dies again before being
+        // dispatched is still logged as PROCESSING, and comes back the same
+        // way next time.
+        $queue = new self($clock);
 
         foreach ($storage->load() as $data) {
             $job = Job::fromArray($data);
@@ -107,6 +113,8 @@ final class InMemoryQueue implements Queue
                 $queue->push($job);
             }
         }
+
+        $queue->storage = $storage;
 
         return $queue;
     }
