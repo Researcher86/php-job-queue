@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Producer;
 
 use App\Job\JobPriority;
+use App\Metrics\MetricsCollector;
 use App\Producer\JobFactory;
 use App\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
@@ -46,5 +47,20 @@ final class JobFactoryTest extends TestCase
         $job = $factory->create(type: 'send_email', priority: JobPriority::LOW);
 
         $this->assertSame(JobPriority::LOW, $job->getPriority());
+    }
+
+    /**
+     * "Jobs created" is counted here rather than in Producer: a job is
+     * created exactly once, whichever route it takes to a queue afterwards.
+     */
+    public function testCreatedJobsAreCounted(): void
+    {
+        $metrics = new MetricsCollector();
+        $factory = new JobFactory(new FakeClock(), $metrics);
+
+        $factory->create('a');
+        $factory->create('b');
+
+        $this->assertSame(2, $metrics->getCounter(MetricsCollector::JOBS_CREATED));
     }
 }

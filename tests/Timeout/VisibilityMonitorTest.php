@@ -31,7 +31,13 @@ final class VisibilityMonitorTest extends TestCase
         $this->assertTrue($monitor->isProcessing($job));
     }
 
-    public function testNullTimeoutDisablesTracking(): void
+    /**
+     * A null timeout switches off expiry, not tracking: the job is still
+     * counted as in flight, it just never becomes overdue. Which keeps
+     * size() an honest gauge of unacknowledged work whether or not the
+     * runtime is configured to reclaim anything.
+     */
+    public function testNullTimeoutTracksWithoutEverExpiring(): void
     {
         $monitor = new VisibilityMonitor(null, $this->clock);
         $job = Job::create(type: 'a');
@@ -39,10 +45,30 @@ final class VisibilityMonitorTest extends TestCase
         $job->markProcessing();
         $monitor->track($job);
 
-        $this->assertFalse($monitor->isProcessing($job));
+        $this->assertTrue($monitor->isProcessing($job));
+        $this->assertSame(1, $monitor->size());
 
         $this->clock->advance(3600.0);
+
         $this->assertSame([], $monitor->requeueExpired());
+        $this->assertSame(1, $monitor->size());
+    }
+
+    public function testSizeCountsUnacknowledgedJobs(): void
+    {
+        $monitor = new VisibilityMonitor(30, $this->clock);
+        $this->assertSame(0, $monitor->size());
+
+        $first = $this->processingJob('a');
+        $second = $this->processingJob('b');
+        $monitor->track($first);
+        $monitor->track($second);
+
+        $this->assertSame(2, $monitor->size());
+
+        $monitor->release($first);
+
+        $this->assertSame(1, $monitor->size());
     }
 
     public function testReleasedJobIsNoLongerProcessing(): void
@@ -109,5 +135,14 @@ final class VisibilityMonitorTest extends TestCase
         $this->assertCount(1, $expired);
         $this->assertSame('soon', $expired[0]->getType());
         $this->assertTrue($monitor->isProcessing($later));
+    }
+
+    private function processingJob(string $type): Job
+    {
+        $job = Job::create(type: $type);
+        $job->markReady($this->clock->now());
+        $job->markProcessing();
+
+        return $job;
     }
 }

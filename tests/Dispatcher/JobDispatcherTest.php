@@ -364,6 +364,87 @@ final class JobDispatcherTest extends TestCase
         $this->assertNotNull($metrics->getLatencyStats('end_to_end'));
     }
 
+    /**
+     * The three latencies measure three different things, and this is the
+     * test that says so: the clock is advanced only while the job waits in
+     * the queue, so queue wait is the wait and execution is not.
+     */
+    public function testQueueWaitIsMeasuredSeparatelyFromExecution(): void
+    {
+        $metrics = new MetricsCollector();
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {}, $metrics);
+        $pool->start();
+
+        $job = Job::create(type: 'a', clock: $clock);
+        $queue->push($job);
+
+        // The job is available now, but nothing dispatches for 5 seconds.
+        $clock->advance(5.0);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, metrics: $metrics);
+        $dispatcher->drain();
+
+        $this->assertSame(5.0, $metrics->getLatencyStats(MetricsCollector::LATENCY_QUEUE_WAIT)['avg']);
+        $this->assertSame(0.0, $metrics->getLatencyStats(MetricsCollector::LATENCY_EXECUTION)['avg']);
+        $this->assertSame(5.0, $metrics->getLatencyStats(MetricsCollector::LATENCY_END_TO_END)['avg']);
+    }
+
+    /**
+     * A delayed job's deliberate wait is not queue wait. It counts towards
+     * end-to-end - the caller did wait that long - but the queue was not
+     * behind, so the number that would tell you to add workers must not
+     * move.
+     */
+    public function testADeliberateDelayIsNotCountedAsQueueWait(): void
+    {
+        $metrics = new MetricsCollector();
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {}, $metrics);
+        $pool->start();
+
+        $queue->push(Job::create(type: 'later', clock: $clock), delay: 60);
+        $clock->advance(60.0);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, metrics: $metrics);
+        $dispatcher->drain();
+
+        $this->assertSame(0.0, $metrics->getLatencyStats(MetricsCollector::LATENCY_QUEUE_WAIT)['avg']);
+        $this->assertSame(60.0, $metrics->getLatencyStats(MetricsCollector::LATENCY_END_TO_END)['avg']);
+    }
+
+    public function testObserveReportsWhatTheSystemLooksLikeNow(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool->start();
+        $dlq = new DeadLetterQueue($clock);
+
+        $queue->push(Job::create(type: 'now', clock: $clock));
+        $queue->push(Job::create(type: 'later', clock: $clock), delay: 60);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 30, dlq: $dlq);
+        $idle = $dispatcher->observe();
+
+        $this->assertSame(1, $idle->ready);
+        $this->assertSame(1, $idle->delayed);
+        $this->assertSame(0, $idle->processing);
+        $this->assertSame(2, $idle->workers);
+        $this->assertSame(0, $idle->busyWorkers);
+        $this->assertSame(2, $idle->idleWorkers());
+        $this->assertSame(0, $idle->deadLettered);
+
+        $dispatcher->drain();
+        $drained = $dispatcher->observe();
+
+        $this->assertSame(0, $drained->ready);
+        $this->assertSame(0, $drained->processing);
+        $this->assertSame(['ready', 'delayed', 'processing', 'workers', 'busy_workers', 'idle_workers', 'dead_lettered'], array_keys($drained->toArray()));
+    }
+
     public function testMetricsCountRetriesAndDlq(): void
     {
         $metrics = new MetricsCollector();

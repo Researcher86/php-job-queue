@@ -84,7 +84,12 @@ final class PriorityQueue implements Queue
 
     public function size(): int
     {
-        return array_sum(array_map('count', $this->ready)) + $this->scheduler->size();
+        return $this->readySize() + $this->scheduler->size();
+    }
+
+    public function readySize(): int
+    {
+        return array_sum(array_map('count', $this->ready));
     }
 
     public function delayedSize(): int

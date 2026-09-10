@@ -7,6 +7,7 @@ namespace App\Dispatcher;
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
 use App\Metrics\MetricsCollector;
+use App\Metrics\QueueMetrics;
 use App\Persistence\JobStorage;
 use App\Queue\Queue;
 use App\Retry\RetryPolicy;
@@ -127,6 +128,26 @@ final class JobDispatcher
         return $this->monitor->isProcessing($job);
     }
 
+    /**
+     * A gauge reading of the whole system, right now - PLAN.md Phase 14.
+     *
+     * Read from the live objects rather than accumulated as events, because
+     * a gauge that is maintained by hand drifts: every push, pop, crash and
+     * requeue would have to remember to adjust it, and the one path that
+     * forgets is invisible.
+     */
+    public function observe(): QueueMetrics
+    {
+        return new QueueMetrics(
+            ready: $this->queue->readySize(),
+            delayed: $this->queue->delayedSize(),
+            processing: $this->monitor->size(),
+            workers: $this->workerPool->count(),
+            busyWorkers: $this->workerPool->busyCount(),
+            deadLettered: $this->dlq?->size() ?? 0,
+        );
+    }
+
     public function isAccepting(): bool
     {
         return $this->accepting;
@@ -166,9 +187,23 @@ final class JobDispatcher
      */
     private function dispatch(Worker $worker, Job $job): bool
     {
+        // Read before markProcessing(), which clears it: the job is no
+        // longer waiting, so it no longer has a time at which it became
+        // available. What it waited FOR is measured from that instant, not
+        // from creation - a job deliberately delayed by an hour did not
+        // spend an hour queued behind a busy pool.
+        $availableAt = $job->getAvailableAt();
+
         $job->markProcessing();
         $this->monitor->track($job);
         $this->recordStart($job);
+
+        if ($availableAt !== null) {
+            $this->metrics?->recordLatency(
+                MetricsCollector::LATENCY_QUEUE_WAIT,
+                max(0.0, $this->clock->now() - $availableAt),
+            );
+        }
 
         try {
             $worker->assign($job);
@@ -198,13 +233,19 @@ final class JobDispatcher
             return;
         }
 
-        $this->metrics?->recordLatency('execution', $this->clock->now() - $this->takeStart($job, $outcome->getStartedAt()));
+        $this->metrics?->recordLatency(
+            MetricsCollector::LATENCY_EXECUTION,
+            $this->clock->now() - $this->takeStart($job, $outcome->getStartedAt()),
+        );
 
         if ($result->isSuccess()) {
             $job->markCompleted();
             $this->persist($job);
-            $this->metrics?->increment('completed');
-            $this->metrics?->recordLatency('end_to_end', $this->clock->now() - $job->getCreatedAt());
+            $this->metrics?->increment(MetricsCollector::JOBS_COMPLETED);
+            $this->metrics?->recordLatency(
+                MetricsCollector::LATENCY_END_TO_END,
+                $this->clock->now() - $job->getCreatedAt(),
+            );
             return;
         }
 
@@ -218,16 +259,16 @@ final class JobDispatcher
             $job->markRetry($this->clock->now() + $delay);
             $this->queue->push($job);
             $this->persist($job);
-            $this->metrics?->increment('retried');
+            $this->metrics?->increment(MetricsCollector::JOBS_RETRIED);
             return;
         }
 
         $job->markFailed();
         $this->persist($job);
-        $this->metrics?->increment('failed');
+        $this->metrics?->increment(MetricsCollector::JOBS_FAILED);
         if ($this->dlq !== null && $exception !== null) {
             $this->dlq->add($job, $exception);
-            $this->metrics?->increment('dlq');
+            $this->metrics?->increment(MetricsCollector::JOBS_DEAD_LETTERED);
         }
     }
 

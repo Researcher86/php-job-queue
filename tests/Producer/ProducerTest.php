@@ -7,6 +7,7 @@ namespace App\Tests\Producer;
 use App\Job\JobId;
 use App\Job\JobPriority;
 use App\Job\JobState;
+use App\Metrics\MetricsCollector;
 use App\Producer\JobFactory;
 use App\Producer\Producer;
 use App\Queue\InMemoryQueue;
@@ -93,5 +94,20 @@ final class ProducerTest extends TestCase
         $this->assertSame(JobState::DELAYED, $job->getState());
         $this->assertNull($queue->pop());
         $this->assertSame(1, $queue->size());
+    }
+
+    public function testDispatchedJobsAreCountedAsCreated(): void
+    {
+        $metrics = new MetricsCollector();
+        $producer = new Producer(
+            new InMemoryQueue(new FakeClock()),
+            new JobFactory(new FakeClock(), $metrics),
+        );
+
+        $producer->dispatch('send_email');
+        $producer->dispatch('send_email');
+        $producer->dispatch('generate_report');
+
+        $this->assertSame(3, $metrics->getCounter(MetricsCollector::JOBS_CREATED));
     }
 }

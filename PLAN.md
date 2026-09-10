@@ -1501,6 +1501,41 @@ It may mean:
 
 > The job waited in the queue.
 
+### Implementation
+
+Two objects, because counters and gauges are different things:
+
+* `MetricsCollector` — cumulative counters (`created`, `completed`,
+  `failed`, `retried`, `dlq`, `worker_crashes`) and latency samples
+  (`queue_wait`, `execution`, `end_to_end`). The names are constants on the
+  class, so the vocabulary of the system is readable in one place and a typo
+  is a fatal error rather than a counter that silently stays at zero.
+* `QueueMetrics` — an immutable gauge reading (`ready`, `delayed`,
+  `processing`, `workers`, `busyWorkers`, `deadLettered`), produced by
+  `JobDispatcher::observe()` and read from the live objects rather than
+  maintained by hand, because a hand-maintained gauge drifts the moment one
+  path forgets to adjust it.
+
+The reading that matters most is two of them together: idle workers **and** a
+non-empty ready queue at the same time means the dispatcher is not keeping
+up, which is a different problem from either number being high alone.
+
+The three latencies are not three views of one number, and end-to-end is not
+the sum of the other two: a retried job passes through queue wait and
+execution once per attempt, inside one end-to-end span. A deliberate delay
+counts towards end-to-end and deliberately does **not** count as queue
+wait - the caller did wait, but the queue was not behind.
+
+### Tests
+
+* [x] Counters start at zero and add up
+* [x] Jobs created are counted at the factory
+* [x] Completed, retried, failed and DLQ counters move
+* [x] Worker crashes are counted once, not twice
+* [x] Queue wait is measured separately from execution
+* [x] A deliberate delay is not counted as queue wait
+* [x] `observe()` reports ready, delayed, processing, workers and DLQ
+
 ---
 
 # Phase 15 — Graceful Shutdown
