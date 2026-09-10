@@ -22,7 +22,8 @@ final readonly class DeadLetterRecord
         private Throwable $exception,
         private int $attempts,
         private float $failedAt,
-    ) {}
+    ) {
+    }
 
     public function getJob(): Job
     {

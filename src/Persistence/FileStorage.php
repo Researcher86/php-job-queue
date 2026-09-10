@@ -17,11 +17,12 @@ use RuntimeException;
  * pairs this with periodic snapshots (Option B) so the replay stays
  * bounded; this one does not, and says so.
  */
-final class FileStorage implements JobStorage
+final readonly class FileStorage implements JobStorage
 {
     public function __construct(
-        private readonly string $path,
-    ) {}
+        private string $path,
+    ) {
+    }
 
     public function store(string $key, array $data): void
     {

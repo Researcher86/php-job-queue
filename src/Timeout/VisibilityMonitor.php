@@ -44,8 +44,6 @@ use App\Support\SystemClock;
  */
 final class VisibilityMonitor
 {
-    private Clock $clock;
-
     /** @var array<string, float> job id => the instant its ACK is overdue */
     private array $deadlines = [];
 
@@ -55,9 +53,8 @@ final class VisibilityMonitor
     public function __construct(
         // null disables expiry - see the class docblock. In seconds.
         private readonly ?int $timeout,
-        ?Clock $clock = null,
+        private readonly Clock $clock = new SystemClock(),
     ) {
-        $this->clock = $clock ?? new SystemClock();
     }
 
     public function track(Job $job): void

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Worker;
 
 use App\Job\Job;
+use App\Tests\Support\Handlers;
 use App\Worker\Worker;
 use App\Worker\WorkerDiedException;
 use App\Worker\WorkerState;
@@ -16,7 +17,7 @@ final class WorkerTest extends TestCase
 {
     public function testWorkerSpawnsProcess(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         $this->assertGreaterThan(0, $worker->getPid());
@@ -28,7 +29,7 @@ final class WorkerTest extends TestCase
 
     public function testWorkerProcessesJob(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         $job = Job::create(type: 'send_email');
@@ -64,7 +65,7 @@ final class WorkerTest extends TestCase
 
     public function testWorkerBecomesBusyWhileProcessing(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         $job = Job::create(type: 'test');
@@ -85,7 +86,7 @@ final class WorkerTest extends TestCase
     {
         $this->expectException(LogicException::class);
 
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         $worker->assign(Job::create(type: 'a'));
@@ -98,7 +99,7 @@ final class WorkerTest extends TestCase
     {
         $this->expectException(LogicException::class);
 
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->assign(Job::create(type: 'a'));
     }
 
@@ -125,7 +126,7 @@ final class WorkerTest extends TestCase
 
     public function testReapNoticesAWorkerThatDiedWhileIdle(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
         $this->assertTrue($worker->isAvailable());
 
@@ -140,7 +141,7 @@ final class WorkerTest extends TestCase
 
     public function testReapLeavesALiveWorkerAlone(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         $this->assertFalse($worker->reap());
@@ -178,7 +179,7 @@ final class WorkerTest extends TestCase
 
     public function testAssignToAWorkerKilledWhileIdleReportsItsDeath(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         posix_kill($worker->getPid(), SIGKILL);
@@ -194,7 +195,7 @@ final class WorkerTest extends TestCase
 
     public function testWorkerGetId(): void
     {
-        $worker = new Worker(7, static function (Job $job): void {});
+        $worker = new Worker(7, Handlers::succeeds());
         $worker->spawn();
 
         $this->assertSame(7, $worker->getId());
@@ -204,7 +205,7 @@ final class WorkerTest extends TestCase
 
     public function testIdleWorkerStopsOnDrain(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
         $worker->drain();
@@ -250,7 +251,7 @@ final class WorkerTest extends TestCase
      */
     public function testAWorkerGoingOutOfScopeLeavesNoProcessBehind(): void
     {
-        $worker = new Worker(1, static function (Job $job): void {});
+        $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
         $pid = $worker->getPid();
 

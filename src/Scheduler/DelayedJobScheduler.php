@@ -44,6 +44,9 @@ final class DelayedJobScheduler
 
     public function __construct()
     {
+        // Built here rather than taken as a promoted parameter: the heap is
+        // this object's own, and a constructor argument would advertise that
+        // two schedulers could be made to share one.
         $this->heap = new DelayedJobHeap();
     }
 

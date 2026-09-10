@@ -9,6 +9,7 @@ use App\Job\Job;
 use App\Metrics\MetricsCollector;
 use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
+use App\Tests\Support\Handlers;
 use App\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -20,7 +21,7 @@ final class StressTest extends TestCase
         $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(8, static function (Job $job): void {});
+        $pool = new WorkerPool(8, Handlers::succeeds());
         $pool->start();
 
         for ($i = 0; $i < 1000; $i++) {
@@ -50,7 +51,7 @@ final class StressTest extends TestCase
         $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(8, static function (Job $job): void {});
+        $pool = new WorkerPool(8, Handlers::succeeds());
         $pool->start();
 
         for ($i = 0; $i < 10_000; $i++) {
@@ -102,7 +103,7 @@ final class StressTest extends TestCase
         $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(8, static function (Job $job): void {});
+        $pool = new WorkerPool(8, Handlers::succeeds());
         $pool->start();
 
         for ($i = 0; $i < 1000; $i++) {

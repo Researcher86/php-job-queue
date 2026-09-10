@@ -19,7 +19,8 @@ final readonly class FixedDelayRetry implements RetryPolicy
 {
     public function __construct(
         private int $delay = 1,
-    ) {}
+    ) {
+    }
 
     public function nextDelay(Job $job): int
     {

@@ -23,17 +23,15 @@ use App\Support\SystemClock;
  */
 final class InMemoryQueue implements Queue
 {
-    private Clock $clock;
-
-    private DelayedJobScheduler $scheduler;
-
     /** @var list<Job> */
     private array $ready = [];
 
-    public function __construct(?Clock $clock = null, private ?JobStorage $storage = null)
-    {
-        $this->clock = $clock ?? new SystemClock();
-        $this->scheduler = new DelayedJobScheduler();
+    public function __construct(
+        private readonly Clock $clock = new SystemClock(),
+        // Not readonly: restoreFromStorage() attaches the log only after the
+        // replay, so the replay does not write back what it just read.
+        private readonly ?JobStorage $storage = new DelayedJobScheduler(),
+    ) {
     }
 
     public function push(Job $job, int $delay = 0): void
@@ -92,7 +90,7 @@ final class InMemoryQueue implements Queue
      * COMPLETED and FAILED are terminal and are simply not restored - a
      * finished job is not work.
      */
-    public static function restoreFromStorage(JobStorage $storage, ?Clock $clock = null): self
+    public static function restoreFromStorage(JobStorage $storage, Clock $clock = new SystemClock()): self
     {
         // Replayed with no storage attached, then attached afterwards: a
         // push() writes, and writing back every job we just read would add

@@ -20,7 +20,8 @@ final readonly class JobId
 {
     private function __construct(
         private UuidInterface $uuid,
-    ) {}
+    ) {
+    }
 
     public static function generate(): self
     {

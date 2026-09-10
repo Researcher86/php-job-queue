@@ -14,4 +14,6 @@ use RuntimeException;
  * responsibility and has to go back to the queue - see
  * JobDispatcher::dispatch().
  */
-final class WorkerDiedException extends RuntimeException {}
+final class WorkerDiedException extends RuntimeException
+{
+}

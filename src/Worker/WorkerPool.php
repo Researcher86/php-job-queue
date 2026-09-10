@@ -30,11 +30,9 @@ final class WorkerPool
      */
     private bool $draining = false;
 
-    /**
-     * @param Closure(Job): mixed $handler
-     */
     public function __construct(
         private readonly int $size,
+        /** @var Closure(Job): mixed */
         private readonly Closure $handler,
         private readonly ?MetricsCollector $metrics = null,
     ) {

@@ -32,8 +32,9 @@ final class IdempotencyGuard
     /** @var array<string, true> */
     private array $processed = [];
 
-    public function __construct(private readonly ?JobStorage $storage = null)
-    {
+    public function __construct(
+        private readonly ?JobStorage $storage = null,
+    ) {
         if ($storage === null) {
             return;
         }

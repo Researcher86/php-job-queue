@@ -24,7 +24,8 @@ final readonly class ExponentialBackoffRetry implements RetryPolicy
     public function __construct(
         private int $baseDelay = 1,
         private float $factor = 2.0,
-    ) {}
+    ) {
+    }
 
     public function nextDelay(Job $job): int
     {

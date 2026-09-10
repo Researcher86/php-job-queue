@@ -21,7 +21,8 @@ final readonly class JobResult
     private function __construct(
         private bool $success,
         private ?Throwable $exception = null,
-    ) {}
+    ) {
+    }
 
     public static function success(): self
     {

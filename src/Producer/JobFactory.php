@@ -18,13 +18,12 @@ use App\Support\SystemClock;
  * why "jobs created" is counted here and not in Producer: a job is created
  * exactly once, here, whichever route it takes to a queue afterwards.
  */
-final class JobFactory
+final readonly class JobFactory
 {
-    private Clock $clock;
-
-    public function __construct(?Clock $clock = null, private readonly ?MetricsCollector $metrics = null)
-    {
-        $this->clock = $clock ?? new SystemClock();
+    public function __construct(
+        private Clock $clock = new SystemClock(),
+        private ?MetricsCollector $metrics = null,
+    ) {
     }
 
     /**

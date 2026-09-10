@@ -164,8 +164,10 @@ final class Worker
 
     public function __construct(
         private readonly int $id,
+        /** @var Closure(Job): mixed */
         private readonly Closure $handler,
-    ) {}
+    ) {
+    }
 
     public function spawn(): void
     {

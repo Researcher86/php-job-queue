@@ -71,7 +71,8 @@ final class QueueRuntime
         private readonly Clock $clock = new SystemClock(),
         private readonly float $maxWait = self::DEFAULT_MAX_WAIT,
         private readonly float $shutdownGrace = self::DEFAULT_SHUTDOWN_GRACE,
-    ) {}
+    ) {
+    }
 
     /**
      * Forks the workers, installs the signal handlers, and ticks until

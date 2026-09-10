@@ -10,6 +10,7 @@ use App\Job\JobState;
 use App\Master\QueueRuntime;
 use App\Queue\InMemoryQueue;
 use App\Tests\Support\FakeClock;
+use App\Tests\Support\Handlers;
 use App\Worker\WorkerPool;
 use Closure;
 use PHPUnit\Framework\TestCase;
@@ -37,7 +38,7 @@ final class QueueRuntimeTest extends TestCase
             $this->queue->push($job);
         }
 
-        $dispatcher = $this->dispatcher(static function (Job $job): void {}, workers: 2);
+        $dispatcher = $this->dispatcher(Handlers::succeeds(), workers: 2);
         $runtime = new QueueRuntime($dispatcher, $this->clock, maxWait: 0.01);
         $dispatcher->start();
 
@@ -61,7 +62,7 @@ final class QueueRuntimeTest extends TestCase
         $job = Job::create(type: 'later', clock: $this->clock);
         $this->queue->push($job, delay: 60);
 
-        $dispatcher = $this->dispatcher(static function (Job $j): void {});
+        $dispatcher = $this->dispatcher(Handlers::succeeds());
         $runtime = new QueueRuntime($dispatcher, $this->clock, maxWait: 0.001);
         $dispatcher->start();
 
@@ -89,7 +90,7 @@ final class QueueRuntimeTest extends TestCase
         $job = Job::create(type: 'never-runs', clock: $this->clock);
         $this->queue->push($job);
 
-        $dispatcher = $this->dispatcher(static function (Job $j): void {});
+        $dispatcher = $this->dispatcher(Handlers::succeeds());
         $runtime = new QueueRuntime($dispatcher, $this->clock, maxWait: 0.001, shutdownGrace: 1.0);
 
         $this->assertFalse($runtime->isRunning());
@@ -167,7 +168,7 @@ final class QueueRuntimeTest extends TestCase
 
     public function testShutdownStopsAcceptingNewWork(): void
     {
-        $dispatcher = $this->dispatcher(static function (Job $job): void {});
+        $dispatcher = $this->dispatcher(Handlers::succeeds());
         $dispatcher->start();
 
         $this->assertTrue($dispatcher->isAccepting());

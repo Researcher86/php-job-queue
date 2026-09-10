@@ -29,19 +29,15 @@ use App\Support\SystemClock;
  */
 final class PriorityQueue implements Queue
 {
-    private Clock $clock;
-
-    private LaneSelector $selector;
-
     private DelayedJobScheduler $scheduler;
 
     /** @var array<string, list<Job>> priority name => FIFO lane */
     private array $ready;
 
-    public function __construct(?Clock $clock = null, ?LaneSelector $selector = null)
-    {
-        $this->clock = $clock ?? new SystemClock();
-        $this->selector = $selector ?? new StrictPriority();
+    public function __construct(
+        private readonly Clock $clock = new SystemClock(),
+        private readonly LaneSelector $selector = new StrictPriority(),
+    ) {
         $this->scheduler = new DelayedJobScheduler();
         $this->ready = array_fill_keys(array_map(
             static fn (JobPriority $priority): string => $priority->name,

@@ -140,7 +140,9 @@ final class IdempotencyTest extends TestCase
     {
         $chargeJob = new ChargePaymentJob(
             new IdempotencyGuard(),
-            static function (string $orderId, float $amount): void {},
+            static function (string $orderId, float $amount): void {
+                // Never reached: the missing key is rejected before the charge.
+            },
         );
 
         $this->expectException(RuntimeException::class);

@@ -13,6 +13,7 @@ use App\Persistence\InMemoryStorage;
 use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
+use App\Tests\Support\Handlers;
 use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
@@ -56,7 +57,7 @@ final class ChaosTest extends TestCase
      */
     public function testIdleWorkerCrashIsNoticedAndReplaced(): void
     {
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(2, Handlers::succeeds());
         $pool->start();
 
         $idle = $pool->getAvailableWorker();
@@ -92,7 +93,7 @@ final class ChaosTest extends TestCase
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         $pool->start();
 
         $idle = $pool->getAvailableWorker();
@@ -155,7 +156,7 @@ final class ChaosTest extends TestCase
 
         // Simulate the queue process dying and restarting from storage
         $restored = InMemoryQueue::restoreFromStorage($storage, new FakeClock(2000.0));
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         $pool->start();
 
         $dispatcher = new JobDispatcher($restored, $pool, clock: new FakeClock(2000.0));
@@ -411,7 +412,7 @@ final class ChaosTest extends TestCase
         $this->assertSame(3, $queue->size());
 
         // Process them all successfully
-        $pool2 = new WorkerPool(1, static function (Job $job): void {});
+        $pool2 = new WorkerPool(1, Handlers::succeeds());
         $pool2->start();
         $dispatcher = new JobDispatcher($queue, $pool2, clock: $clock);
         $dispatcher->drain();

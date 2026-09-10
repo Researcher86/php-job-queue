@@ -47,8 +47,11 @@ final class WeightedRoundRobin implements LaneSelector
     /**
      * Defaults to PLAN.md Phase 13's example: 5 HIGH per 3 NORMAL per 1 LOW.
      */
-    public function __construct(int $high = 5, int $normal = 3, int $low = 1)
-    {
+    public function __construct(
+        int $high = 5,
+        int $normal = 3,
+        int $low = 1,
+    ) {
         if ($high < 1 || $normal < 1 || $low < 1) {
             throw new InvalidArgumentException(
                 'Every lane needs a weight of at least 1, or it would be starved by construction',

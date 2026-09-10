@@ -27,7 +27,8 @@ final readonly class WorkerOutcome
         private Job $job,
         // null = the worker died holding this job.
         private ?JobResult $result,
-    ) {}
+    ) {
+    }
 
     public function getJob(): Job
     {

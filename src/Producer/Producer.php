@@ -25,7 +25,8 @@ final readonly class Producer
     public function __construct(
         private Queue $queue,
         private JobFactory $jobFactory,
-    ) {}
+    ) {
+    }
 
     /**
      * @param array<string, mixed> $payload

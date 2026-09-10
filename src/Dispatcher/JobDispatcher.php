@@ -61,7 +61,7 @@ use Throwable;
  */
 final class JobDispatcher
 {
-    private VisibilityMonitor $monitor;
+    private readonly VisibilityMonitor $monitor;
 
     private bool $accepting = true;
 
@@ -69,14 +69,16 @@ final class JobDispatcher
     private array $startedAt = [];
 
     public function __construct(
-        private Queue $queue,
-        private WorkerPool $workerPool,
-        private ?RetryPolicy $retryPolicy = null,
-        private Clock $clock = new SystemClock(),
+        private readonly Queue $queue,
+        private readonly WorkerPool $workerPool,
+        private readonly ?RetryPolicy $retryPolicy = null,
+        private readonly Clock $clock = new SystemClock(),
+        // Not promoted: it is what the monitor is built from, not something
+        // the dispatcher keeps.
         ?int $visibilityTimeout = null,
-        private ?DeadLetterQueue $dlq = null,
-        private ?JobStorage $storage = null,
-        private ?MetricsCollector $metrics = null,
+        private readonly ?DeadLetterQueue $dlq = null,
+        private readonly ?JobStorage $storage = null,
+        private readonly ?MetricsCollector $metrics = null,
     ) {
         $this->monitor = new VisibilityMonitor($visibilityTimeout, $clock);
     }

@@ -32,7 +32,8 @@ final readonly class QueueMetrics
         public int $busyWorkers,
         /** Jobs that exhausted their attempts and are waiting for a human. */
         public int $deadLettered,
-    ) {}
+    ) {
+    }
 
     /**
      * Workers with nothing to do. Together with $ready this is the reading

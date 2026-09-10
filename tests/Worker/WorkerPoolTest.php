@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Worker;
 
 use App\Job\Job;
+use App\Tests\Support\Handlers;
 use App\Worker\WorkerPool;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
@@ -15,12 +16,12 @@ final class WorkerPoolTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
 
-        new WorkerPool(0, static function (Job $job): void {});
+        new WorkerPool(0, Handlers::succeeds());
     }
 
     public function testStartCreatesRequestedWorkers(): void
     {
-        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool = new WorkerPool(3, Handlers::succeeds());
         $pool->start();
 
         $this->assertSame(3, $pool->count());
@@ -30,7 +31,7 @@ final class WorkerPoolTest extends TestCase
 
     public function testAllWorkersAreAvailableAfterStart(): void
     {
-        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool = new WorkerPool(3, Handlers::succeeds());
         $pool->start();
 
         foreach ($pool->getWorkers() as $worker) {
@@ -42,7 +43,7 @@ final class WorkerPoolTest extends TestCase
 
     public function testGetAvailableWorkerReturnsFirstWorker(): void
     {
-        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool = new WorkerPool(3, Handlers::succeeds());
         $pool->start();
 
         $worker = $pool->getAvailableWorker();
@@ -55,7 +56,7 @@ final class WorkerPoolTest extends TestCase
 
     public function testGetAvailableWorkerReturnsNullBeforeStart(): void
     {
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
 
         $this->assertNull($pool->getAvailableWorker());
 
@@ -64,7 +65,7 @@ final class WorkerPoolTest extends TestCase
 
     public function testWorkersReturnToPoolAfterJob(): void
     {
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         $pool->start();
 
         $worker = $pool->getAvailableWorker();
@@ -81,7 +82,7 @@ final class WorkerPoolTest extends TestCase
 
     public function testMultipleWorkersProcessJobs(): void
     {
-        $pool = new WorkerPool(3, static function (Job $job): void {});
+        $pool = new WorkerPool(3, Handlers::succeeds());
         $pool->start();
 
         $w1 = $pool->getAvailableWorker();
@@ -136,7 +137,7 @@ final class WorkerPoolTest extends TestCase
 
     public function testDrainPutsAllWorkersIntoDraining(): void
     {
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(2, Handlers::succeeds());
         $pool->start();
 
         $pool->drain();

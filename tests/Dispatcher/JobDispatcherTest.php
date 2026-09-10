@@ -15,6 +15,7 @@ use App\Queue\InMemoryQueue;
 use App\Queue\PriorityQueue;
 use App\Retry\FixedDelayRetry;
 use App\Tests\Support\FakeClock;
+use App\Tests\Support\Handlers;
 use App\Timeout\VisibilityMonitor;
 use App\Worker\WorkerPool;
 use Closure;
@@ -39,7 +40,7 @@ final class JobDispatcherTest extends TestCase
 
     public function testSuccessfulJobIsCompleted(): void
     {
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
+        [$queue, , $dispatcher] = $this->dispatcherWith(Handlers::succeeds());
 
         $job = Job::create(type: 'ok');
         $queue->push($job);
@@ -115,7 +116,7 @@ final class JobDispatcherTest extends TestCase
 
     public function testJobGoesToAvailableWorker(): void
     {
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
+        [$queue, , $dispatcher] = $this->dispatcherWith(Handlers::succeeds());
 
         $job = Job::create(type: 'send_email');
         $queue->push($job);
@@ -130,7 +131,7 @@ final class JobDispatcherTest extends TestCase
     public function testJobsRemainQueuedWhenNoWorkersExist(): void
     {
         $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         // pool not started -> no workers
 
         $job = Job::create(type: 'send_email');
@@ -148,7 +149,7 @@ final class JobDispatcherTest extends TestCase
 
     public function testJobStaysQueuedWhenQueueEmpty(): void
     {
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
+        [$queue, , $dispatcher] = $this->dispatcherWith(Handlers::succeeds());
 
         $result = $dispatcher->dispatchNext();
 
@@ -158,7 +159,7 @@ final class JobDispatcherTest extends TestCase
 
     public function testSingleWorkerProcessesJobsSequentially(): void
     {
-        [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {});
+        [$queue, , $dispatcher] = $this->dispatcherWith(Handlers::succeeds());
 
         $queue->push(Job::create(type: 'a'));
         $queue->push(Job::create(type: 'b'));
@@ -172,7 +173,7 @@ final class JobDispatcherTest extends TestCase
     public function testDrainProcessesAllQueuedJobs(): void
     {
         $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(2, Handlers::succeeds());
         $pool->start();
 
         $queue->push(Job::create(type: 'a'));
@@ -189,7 +190,7 @@ final class JobDispatcherTest extends TestCase
     public function testDispatchDoesNotPopWhenNoWorkerAvailable(): void
     {
         $queue = new InMemoryQueue(new FakeClock());
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
 
         $queue->push(Job::create(type: 'a'));
 
@@ -205,7 +206,7 @@ final class JobDispatcherTest extends TestCase
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         $pool->start();
 
         // Simulate a job that was left in PROCESSING by a crashed worker
@@ -231,7 +232,7 @@ final class JobDispatcherTest extends TestCase
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         $pool->start();
 
         $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
@@ -283,7 +284,7 @@ final class JobDispatcherTest extends TestCase
             $queue->push(Job::create(type: 'a'));
 
             // No worker available, so the job stays queued in READY state
-            $pool = new WorkerPool(1, static function (Job $job): void {});
+            $pool = new WorkerPool(1, Handlers::succeeds());
             $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, storage: $storage);
             $dispatcher->dispatchNext();
 
@@ -314,7 +315,7 @@ final class JobDispatcherTest extends TestCase
             $queue = new InMemoryQueue($clock, $storage);
             $queue->push(Job::create(type: 'done'));
 
-            $pool = new WorkerPool(1, static function (Job $job): void {});
+            $pool = new WorkerPool(1, Handlers::succeeds());
             $pool->start();
             $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, storage: $storage);
             $dispatcher->drain();
@@ -333,7 +334,7 @@ final class JobDispatcherTest extends TestCase
     {
         $clock = new FakeClock(1000.0);
         $queue = new PriorityQueue($clock);
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(2, Handlers::succeeds());
         $pool->start();
 
         $queue->push(Job::create(type: 'low', priority: JobPriority::LOW));
@@ -351,7 +352,7 @@ final class JobDispatcherTest extends TestCase
         $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {}, $metrics);
+        $pool = new WorkerPool(1, Handlers::succeeds(), $metrics);
         $pool->start();
 
         $queue->push(Job::create(type: 'a', clock: $clock));
@@ -374,7 +375,7 @@ final class JobDispatcherTest extends TestCase
         $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {}, $metrics);
+        $pool = new WorkerPool(1, Handlers::succeeds(), $metrics);
         $pool->start();
 
         $job = Job::create(type: 'a', clock: $clock);
@@ -402,7 +403,7 @@ final class JobDispatcherTest extends TestCase
         $metrics = new MetricsCollector();
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {}, $metrics);
+        $pool = new WorkerPool(1, Handlers::succeeds(), $metrics);
         $pool->start();
 
         $queue->push(Job::create(type: 'later', clock: $clock), delay: 60);
@@ -419,7 +420,7 @@ final class JobDispatcherTest extends TestCase
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(2, static function (Job $job): void {});
+        $pool = new WorkerPool(2, Handlers::succeeds());
         $pool->start();
         $dlq = new DeadLetterQueue($clock);
 
@@ -512,7 +513,7 @@ final class JobDispatcherTest extends TestCase
     {
         $clock = new FakeClock(1000.0);
         $queue = new InMemoryQueue($clock);
-        $pool = new WorkerPool(1, static function (Job $job): void {});
+        $pool = new WorkerPool(1, Handlers::succeeds());
         $pool->start();
 
         $job = Job::create(type: 'pending');

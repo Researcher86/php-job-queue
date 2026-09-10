@@ -8,11 +8,9 @@ use App\Support\Clock;
 
 final class FakeClock implements Clock
 {
-    private float $time;
-
-    public function __construct(float $startTime = 0.0)
-    {
-        $this->time = $startTime;
+    public function __construct(
+        private float $time = 0.0,
+    ) {
     }
 
     public function now(): float

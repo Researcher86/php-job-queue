@@ -28,14 +28,12 @@ use Throwable;
  */
 final class DeadLetterQueue
 {
-    private Clock $clock;
-
     /** @var array<string, DeadLetterRecord> */
     private array $records = [];
 
-    public function __construct(?Clock $clock = null)
-    {
-        $this->clock = $clock ?? new SystemClock();
+    public function __construct(
+        private readonly Clock $clock = new SystemClock(),
+    ) {
     }
 
     public function add(Job $job, Throwable $exception): void

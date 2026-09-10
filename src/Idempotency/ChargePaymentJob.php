@@ -16,15 +16,16 @@ use RuntimeException;
  * deliver the same logical operation more than once. The handler deduplicates
  * the side effect by idempotency key instead of relying on delivery guarantees.
  */
-final class ChargePaymentJob
+final readonly class ChargePaymentJob
 {
     /**
      * @param Closure(string, float): void $charger executes the real charge
      */
     public function __construct(
-        private readonly IdempotencyGuard $guard,
-        private readonly Closure $charger,
-    ) {}
+        private IdempotencyGuard $guard,
+        private Closure $charger,
+    ) {
+    }
 
     public function __invoke(Job $job): JobResult
     {
