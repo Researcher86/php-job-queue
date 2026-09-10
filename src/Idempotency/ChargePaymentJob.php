@@ -10,11 +10,23 @@ use Closure;
 use RuntimeException;
 
 /**
- * Demo of an idempotent job handler.
+ * A handler that deduplicates its own side effect - the worked example for
+ * PLAN.md's engineering question 5.
  *
- * A payment may legally be charged only once, but an at-least-once queue can
- * deliver the same logical operation more than once. The handler deduplicates
- * the side effect by idempotency key instead of relying on delivery guarantees.
+ * A payment may legally be charged once, and an at-least-once queue will
+ * sometimes deliver the same operation twice: a worker that crashed after
+ * charging, or a handler that outlived its visibility deadline. So the
+ * handler cannot rely on the delivery count. It checks a key that names the
+ * OPERATION - "payment:order-7" - and does nothing if that key has already
+ * been seen.
+ *
+ * Note what makes the key usable: it comes from the job's payload-level
+ * idempotencyKey, set by the producer, so it is the same string on every
+ * redelivery. A key derived from the job id or the attempt number would be
+ * different each time and would deduplicate nothing.
+ *
+ * This is deduplication, not exactly-once execution - see IdempotencyGuard
+ * for the crash window that remains and what actually closes it.
  */
 final readonly class ChargePaymentJob
 {

@@ -16,7 +16,7 @@ use App\Worker\Worker;
  * has no monitor, so it mints its own - and having to say so is the point:
  * a worker is handed a lease, not a job.
  */
-final class Deliveries
+final readonly class Deliveries
 {
     public static function to(Worker $worker, Job $job): Delivery
     {

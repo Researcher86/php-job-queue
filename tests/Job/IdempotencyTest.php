@@ -228,4 +228,88 @@ final class IdempotencyTest extends TestCase
             }
         }
     }
+
+    /**
+     * The limit of this pattern, made observable rather than left as a
+     * caveat: the charge and the record of it are two steps, and a process
+     * that dies between them charges twice.
+     *
+     *   isProcessed()  ->  false
+     *   charge         ->  the money has moved
+     *   💀              ->  markProcessed() never runs
+     *   restart
+     *   isProcessed()  ->  still false
+     *   charge         ->  AGAIN
+     *
+     * A real crash, not a simulated one: the child SIGKILLs itself between
+     * the two steps, so nothing runs on the way out.
+     *
+     * This is why the guard is a deduplication mechanism and not
+     * exactly-once delivery. Closing the window needs the side effect and
+     * its record to commit together - one database transaction, or the
+     * remote system's own idempotency key - which is a property of the
+     * thing being charged, not something a queue can provide.
+     */
+    public function testACrashBetweenTheChargeAndItsRecordChargesTwice(): void
+    {
+        $chargeLog = sys_get_temp_dir() . '/php-job-queue-charges-' . uniqid('', true) . '.log';
+        $guardLog = sys_get_temp_dir() . '/php-job-queue-guard-' . uniqid('', true) . '.log';
+
+        try {
+            $charge = static function (string $orderId, float $amount) use ($chargeLog): void {
+                file_put_contents($chargeLog, $orderId . "\n", FILE_APPEND | LOCK_EX);
+            };
+            $job = Job::create(
+                type: 'charge_payment',
+                payload: ['order_id' => 'order-7', 'amount' => 49.90],
+                idempotencyKey: 'payment:order-7',
+            );
+
+            $pid = pcntl_fork();
+            $this->assertNotSame(-1, $pid, 'fork failed');
+
+            if ($pid === 0) {
+                $handler = new ChargePaymentJob(
+                    new IdempotencyGuard(new FileStorage($guardLog)),
+                    static function (string $orderId, float $amount) use ($charge): void {
+                        $charge($orderId, $amount);
+
+                        // The money has moved. Now the process dies, before
+                        // the guard can write down that it did.
+                        posix_kill(posix_getpid(), SIGKILL);
+                    },
+                );
+                $handler($job);
+                exit(0);
+            }
+
+            pcntl_waitpid($pid, $status);
+            $this->assertTrue(pcntl_wifsignaled($status), 'the child died mid-handler');
+            $this->assertSame(['order-7'], $this->linesOf($chargeLog), 'charged once so far');
+
+            // Restart. The guard reads the same log, and finds nothing.
+            $guard = new IdempotencyGuard(new FileStorage($guardLog));
+            $this->assertFalse($guard->isProcessed('payment:order-7'), 'the key was never recorded');
+
+            (new ChargePaymentJob($guard, $charge))($job);
+
+            $this->assertSame(['order-7', 'order-7'], $this->linesOf($chargeLog), 'charged twice');
+        } finally {
+            foreach ([$chargeLog, $guardLog] as $file) {
+                if (file_exists($file)) {
+                    unlink($file);
+                }
+            }
+        }
+    }
+
+    /** @return list<string> */
+    private function linesOf(string $path): array
+    {
+        if (!file_exists($path)) {
+            return [];
+        }
+
+        return array_values(file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []);
+    }
 }
