@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Worker;
 
 use App\Job\Job;
+use App\Tests\Support\Deliveries;
 use App\Tests\Support\Handlers;
 use App\Worker\WorkerPool;
 use InvalidArgumentException;
@@ -70,7 +71,7 @@ final class WorkerPoolTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign(Job::create(type: 'test'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
 
         $result = $pool->poll(null);
 
@@ -87,17 +88,17 @@ final class WorkerPoolTest extends TestCase
 
         $w1 = $pool->getAvailableWorker();
         $this->assertNotNull($w1);
-        $w1->assign(Job::create(type: 'a'));
+        $w1->assign(Deliveries::to($w1, Job::create(type: 'a')));
 
         $w2 = $pool->getAvailableWorker();
         $this->assertNotNull($w2);
         $this->assertNotSame($w1->getId(), $w2->getId());
-        $w2->assign(Job::create(type: 'b'));
+        $w2->assign(Deliveries::to($w2, Job::create(type: 'b')));
 
         $w3 = $pool->getAvailableWorker();
         $this->assertNotNull($w3);
         $this->assertNotSame($w1->getId(), $w3->getId());
-        $w3->assign(Job::create(type: 'c'));
+        $w3->assign(Deliveries::to($w3, Job::create(type: 'c')));
 
         $completed = 0;
         while ($pool->poll(null) !== null) {
@@ -119,7 +120,7 @@ final class WorkerPoolTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign(Job::create(type: 'a'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'a')));
         posix_kill($worker->getPid(), SIGKILL);
 
         $result = $pool->poll(null);
@@ -160,7 +161,7 @@ final class WorkerPoolTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign(Job::create(type: 'a'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'a')));
         $pool->drain();
 
         $this->assertTrue($pool->isDraining());

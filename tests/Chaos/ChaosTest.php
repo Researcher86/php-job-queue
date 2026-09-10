@@ -12,6 +12,7 @@ use App\Metrics\MetricsCollector;
 use App\Persistence\InMemoryStorage;
 use App\Queue\InMemoryQueue;
 use App\Retry\FixedDelayRetry;
+use App\Tests\Support\Deliveries;
 use App\Tests\Support\FakeClock;
 use App\Tests\Support\Handlers;
 use App\Timeout\VisibilityMonitor;
@@ -77,7 +78,7 @@ final class ChaosTest extends TestCase
         // And the replacement is a usable worker, not just a slot.
         $replacement = $pool->getAvailableWorker();
         $this->assertNotNull($replacement);
-        $replacement->assign(Job::create(type: 'after-crash'));
+        $replacement->assign(Deliveries::to($replacement, Job::create(type: 'after-crash')));
         $result = $pool->poll(null);
         $this->assertTrue($result?->getResult()?->isSuccess());
 
@@ -126,7 +127,7 @@ final class ChaosTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign($job);
+        $worker->assign(Deliveries::to($worker, $job));
         posix_kill($worker->getPid(), SIGKILL);
 
         $result = $pool->poll(null);
@@ -137,7 +138,7 @@ final class ChaosTest extends TestCase
         $pool->replaceDeadWorkers();
         $recovered = $pool->getAvailableWorker();
         $this->assertNotNull($recovered);
-        $recovered->assign($job);
+        $recovered->assign(Deliveries::to($recovered, $job));
         $retried = $pool->poll(null);
         $this->assertNotNull($retried);
         $this->assertTrue($retried->getResult()?->isSuccess());
@@ -222,6 +223,124 @@ final class ChaosTest extends TestCase
         $this->assertSame(1, $metrics->getCounter(MetricsCollector::STALE_ACKS));
     }
 
+    /**
+     * The late answer from an expired delivery must not be mistaken for the
+     * answer to the delivery that replaced it.
+     *
+     * Worker A gets the job and is slow. The visibility deadline passes, so
+     * the job goes back to READY and worker B gets it - a duplicate
+     * delivery, which is expected. Then worker A finishes and reports.
+     *
+     * At that moment the job IS in state PROCESSING, because worker B put
+     * it there. So a stale-answer check that only looks at the job's state
+     * cannot tell the two deliveries apart: it accepts A's answer as B's.
+     */
+    public function testALateAnswerFromAnExpiredDeliveryIsNotAppliedToTheNewOne(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $metrics = new MetricsCollector();
+
+        // Delivery 1 answers in 100ms, delivery 2 takes 600ms - so A's
+        // answer is certain to arrive while B is still working.
+        $pool = new WorkerPool(2, static function (Job $job): void {
+            usleep($job->getAttempts() === 1 ? 100_000 : 600_000);
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'slow', maxAttempts: 5, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 1, metrics: $metrics);
+
+        $this->assertSame(1, $dispatcher->dispatchPending(), 'delivery 1 → worker A');
+
+        $clock->advance(2.0);
+        $this->assertSame(1, $dispatcher->requeueExpired());
+        $this->assertSame(1, $dispatcher->dispatchPending(), 'delivery 2 → worker B');
+        $this->assertSame(2, $job->getAttempts());
+
+        // Worker A's answer, for a delivery nobody is waiting for.
+        $this->assertSame(1, $dispatcher->collect(null));
+
+        $this->assertSame(1, $metrics->getCounter(MetricsCollector::STALE_ACKS), 'A answered a dead delivery');
+        $this->assertSame(0, $metrics->getCounter(MetricsCollector::JOBS_COMPLETED), 'B has not answered yet');
+        $this->assertSame(JobState::PROCESSING, $job->getState(), 'B is still working on it');
+        $this->assertTrue($dispatcher->isProcessing($job), 'B\'s delivery is still tracked');
+
+        $dispatcher->shutdown(2.0);
+    }
+
+    /**
+     * The same two deliveries, followed to the end: the live one decides
+     * the job's fate and the expired one changes nothing but a counter.
+     *
+     * The invariant that matters is the last one. The job stays in flight -
+     * leased, with a deadline that can still reclaim it - until the LIVE
+     * delivery answers. If the stale answer had released the lease, a job
+     * would have been sitting in a worker's hands with nothing left that
+     * could ever bring it back.
+     */
+    public function testOnlyTheLiveDeliveryDecidesTheOutcome(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $metrics = new MetricsCollector();
+        $dlq = new DeadLetterQueue($clock);
+
+        // Delivery 1 succeeds quickly; delivery 2 is slower and FAILS. So
+        // if the answers were ever confused, the job would come out
+        // COMPLETED instead of retried - which is what used to happen.
+        $pool = new WorkerPool(2, static function (Job $job): void {
+            if ($job->getAttempts() === 1) {
+                usleep(100_000);
+
+                return;
+            }
+
+            usleep(500_000);
+
+            throw new RuntimeException('delivery 2 failed');
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'slow', maxAttempts: 5, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher(
+            $queue,
+            $pool,
+            new FixedDelayRetry(0),
+            $clock,
+            visibilityTimeout: 1,
+            dlq: $dlq,
+            metrics: $metrics,
+        );
+
+        $dispatcher->dispatchPending();
+        $clock->advance(2.0);
+        $dispatcher->requeueExpired();
+        $dispatcher->dispatchPending();
+
+        // Delivery 1's late success, then delivery 2's real failure.
+        $dispatcher->collect(null);
+        $this->assertTrue($dispatcher->isProcessing($job), 'still leased by delivery 2');
+
+        $dispatcher->collect(null);
+
+        $this->assertSame(1, $metrics->getCounter(MetricsCollector::STALE_ACKS));
+        $this->assertSame(0, $metrics->getCounter(MetricsCollector::JOBS_COMPLETED), 'delivery 1 did not complete it');
+        $this->assertSame(1, $metrics->getCounter(MetricsCollector::JOBS_RETRIED), 'delivery 2 failed, so it retries');
+        $this->assertSame(0, $dlq->size());
+
+        // The lease is discharged only now, by the delivery that held it.
+        $this->assertFalse($dispatcher->isProcessing($job));
+        $this->assertSame(JobState::READY, $job->getState());
+        $this->assertSame(1, $queue->readySize());
+
+        $dispatcher->shutdown(2.0);
+    }
+
     public function testSlowJobsDoNotBreakTheQueue(): void
     {
         $clock = new FakeClock(1000.0);
@@ -285,7 +404,7 @@ final class ChaosTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign($job);
+        $worker->assign(Deliveries::to($worker, $job));
 
         usleep(150_000);
         posix_kill($worker->getPid(), SIGKILL);
@@ -297,7 +416,7 @@ final class ChaosTest extends TestCase
         $pool->replaceDeadWorkers();
         $recovered = $pool->getAvailableWorker();
         $this->assertNotNull($recovered);
-        $recovered->assign($job);
+        $recovered->assign(Deliveries::to($recovered, $job));
         $pool->poll(null);
 
         $countAfterSecond = (int) file_get_contents($counterFile);
@@ -319,7 +438,7 @@ final class ChaosTest extends TestCase
         $popped = $queue->pop($clock->now());
         $this->assertNotNull($popped);
         $popped->markProcessing();
-        $monitor->track($popped);
+        $monitor->track($popped, 1);
 
         $this->assertTrue($monitor->isProcessing($popped));
 
@@ -348,11 +467,11 @@ final class ChaosTest extends TestCase
 
         $w1 = $pool->getAvailableWorker();
         $this->assertNotNull($w1);
-        $w1->assign($job1);
+        $w1->assign(Deliveries::to($w1, $job1));
 
         $w2 = $pool->getAvailableWorker();
         $this->assertNotNull($w2);
-        $w2->assign($job2);
+        $w2->assign(Deliveries::to($w2, $job2));
 
         usleep(10_000);
 
@@ -375,7 +494,7 @@ final class ChaosTest extends TestCase
         $queue->push($job3);
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign($job3);
+        $worker->assign(Deliveries::to($worker, $job3));
         $result = $pool->poll(null);
         $this->assertNotNull($result);
         $this->assertTrue($result->getResult()?->isSuccess());
@@ -399,7 +518,7 @@ final class ChaosTest extends TestCase
 
             $worker = $pool->getAvailableWorker();
             $this->assertNotNull($worker);
-            $worker->assign($job);
+            $worker->assign(Deliveries::to($worker, $job));
 
             usleep(20_000);
             posix_kill($worker->getPid(), SIGKILL);

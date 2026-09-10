@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Worker;
 
+use App\Delivery\Delivery;
 use App\Job\Job;
 use App\Job\JobResult;
 use Closure;
@@ -144,7 +145,7 @@ final class Worker
 
     private WorkerState $state = WorkerState::STARTING;
 
-    private ?Job $currentJob = null;
+    private ?Delivery $currentDelivery = null;
 
     private mixed $stream = null;
 
@@ -231,7 +232,13 @@ final class Worker
     }
 
     /**
-     * Hands the job to the worker process, over the socket, as JSON.
+     * Hands a delivery's job to the worker process, over the socket, as
+     * JSON.
+     *
+     * The DELIVERY is what the worker holds on to, not the job: it is what
+     * the eventual answer has to be attributed to, and a job id alone
+     * cannot say which handing-out answered. Only the job crosses the wire
+     * - the worker has no use for the lease.
      *
      * Throws WorkerDiedException if the process is already gone - killed
      * while it sat IDLE, and killed recently enough that nothing has
@@ -240,13 +247,13 @@ final class Worker
      * work, and the caller still owns the job: see
      * JobDispatcher::dispatch(), which puts it back.
      */
-    public function assign(Job $job): void
+    public function assign(Delivery $delivery): void
     {
         if ($this->state !== WorkerState::IDLE) {
             throw new LogicException('Cannot assign a job to a worker that is not idle');
         }
 
-        $payload = json_encode($job->toArray(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        $payload = json_encode($delivery->getJob()->toArray(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
 
         try {
             self::writeAll($this->stream, $payload);
@@ -259,7 +266,7 @@ final class Worker
             );
         }
 
-        $this->currentJob = $job;
+        $this->currentDelivery = $delivery;
         $this->apply('assign');
     }
 
@@ -335,10 +342,10 @@ final class Worker
             return null;
         }
 
-        $job = $this->currentJob;
-        $this->currentJob = null;
+        $delivery = $this->currentDelivery;
+        $this->currentDelivery = null;
 
-        if ($job === null) {
+        if ($delivery === null) {
             throw new LogicException('Worker returned without an assigned job');
         }
 
@@ -350,7 +357,7 @@ final class Worker
         if ($frame === null) {
             $this->apply('die');
 
-            return new WorkerOutcome($job, null);
+            return new WorkerOutcome($delivery, null);
         }
 
         $data = json_decode($frame, true, flags: JSON_THROW_ON_ERROR);
@@ -359,7 +366,7 @@ final class Worker
         // retired while it finished this last job.
         $this->apply('finish');
 
-        return new WorkerOutcome($job, $this->decodeResult($data));
+        return new WorkerOutcome($delivery, $this->decodeResult($data));
     }
 
     public function getId(): int
@@ -382,9 +389,15 @@ final class Worker
         return $this->state;
     }
 
+    /** The lease this worker is holding, if any. */
+    public function getCurrentDelivery(): ?Delivery
+    {
+        return $this->currentDelivery;
+    }
+
     public function getCurrentJob(): ?Job
     {
-        return $this->currentJob;
+        return $this->currentDelivery?->getJob();
     }
 
     public function isAvailable(): bool
@@ -408,7 +421,7 @@ final class Worker
      */
     public function isWorking(): bool
     {
-        return $this->currentJob !== null;
+        return $this->currentDelivery !== null;
     }
 
     public function isDead(): bool

@@ -14,6 +14,7 @@ use App\Persistence\FileStorage;
 use App\Queue\InMemoryQueue;
 use App\Queue\PriorityQueue;
 use App\Retry\FixedDelayRetry;
+use App\Tests\Support\Deliveries;
 use App\Tests\Support\FakeClock;
 use App\Tests\Support\Handlers;
 use App\Timeout\VisibilityMonitor;
@@ -214,7 +215,7 @@ final class JobDispatcherTest extends TestCase
         $job->markReady(1000.0);
         $job->markProcessing();
         $monitor = new VisibilityMonitor(30, $clock);
-        $monitor->track($job);
+        $monitor->track($job, 1);
 
         $clock->advance(30.0);
         foreach ($monitor->requeueExpired() as $expired) {
@@ -478,7 +479,7 @@ final class JobDispatcherTest extends TestCase
 
         $worker = $pool->getAvailableWorker();
         $this->assertNotNull($worker);
-        $worker->assign(Job::create(type: 'a'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'a')));
         posix_kill($worker->getPid(), SIGKILL);
 
         $pool->poll(null);

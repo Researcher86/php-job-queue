@@ -4,13 +4,14 @@ declare(strict_types=1);
 
 namespace App\Timeout;
 
+use App\Delivery\Delivery;
 use App\Job\Job;
 use App\Support\Clock;
 use App\Support\SystemClock;
 
 /**
- * Tracks the jobs that are in a worker's hands, and takes back the ones
- * nobody ever acknowledged - PLAN.md Phase 9.
+ * Holds the lease on every job that is in a worker's hands, and takes back
+ * the ones nobody ever acknowledged - PLAN.md Phase 9.
  *
  * A worker that dies mid-job cannot report anything. Without this, the job
  * it was holding is simply gone: not in the queue, not completed, not
@@ -25,14 +26,25 @@ use App\Support\SystemClock;
  * Idempotency/ChargePaymentJob for what that means for a handler with a
  * side effect that must not repeat.
  *
+ * ## One current delivery per job
+ *
+ * What is stored is not "the jobs in flight" but "the delivery currently
+ * entitled to answer for each job". When a deadline expires, the entry is
+ * dropped and the job is handed out again as a NEW delivery with a higher
+ * generation - so the old worker's answer, when it finally arrives, refers
+ * to a lease that no longer exists and is refused by isCurrent().
+ *
+ * That refusal is the whole point of Delivery, and it is not theoretical:
+ * see the class docblock there for what the state-only check let through.
+ *
  * ## Tracking and expiry are separate
  *
- * Every dispatched job is tracked. Only jobs dispatched while a timeout is
- * configured get a DEADLINE. A null timeout therefore means "in-flight jobs
- * are still counted, they just never expire" - which is what makes size()
- * an honest gauge of unacknowledged work either way, and leaves the choice
- * of whether to reclaim jobs to configuration rather than to whether the
- * monitor bothered to notice them.
+ * Every dispatched job gets a delivery. Only deliveries created while a
+ * timeout is configured get a DEADLINE. A null timeout therefore means
+ * "in-flight jobs are still tracked, they just never expire" - which keeps
+ * size() an honest gauge either way, keeps the fencing check working, and
+ * leaves whether to reclaim jobs to configuration rather than to whether
+ * the monitor bothered to notice them.
  *
  * ## Not an execution timeout
  *
@@ -44,11 +56,8 @@ use App\Support\SystemClock;
  */
 final class VisibilityMonitor
 {
-    /** @var array<string, float> job id => the instant its ACK is overdue */
-    private array $deadlines = [];
-
-    /** @var array<string, Job> job id => job, for every job in flight */
-    private array $processing = [];
+    /** @var array<string, Delivery> job id => the delivery entitled to answer */
+    private array $current = [];
 
     public function __construct(
         // null disables expiry - see the class docblock. In seconds.
@@ -57,32 +66,65 @@ final class VisibilityMonitor
     ) {
     }
 
-    public function track(Job $job): void
+    /**
+     * Issues the lease for a job about to be handed to $workerId, and
+     * returns it. Any previous delivery of the same job stops being
+     * current, which is exactly what makes its late answer refusable.
+     *
+     * Call it after markProcessing() - that is what settles the generation.
+     */
+    public function track(Job $job, int $workerId): Delivery
     {
-        $id = $job->getId()->toString();
-        $this->processing[$id] = $job;
+        $now = $this->clock->now();
 
-        if ($this->timeout !== null) {
-            $this->deadlines[$id] = $this->clock->now() + $this->timeout;
-        }
+        $delivery = Delivery::of(
+            job: $job,
+            workerId: $workerId,
+            now: $now,
+            deadline: $this->timeout === null ? null : $now + $this->timeout,
+        );
+
+        $this->current[$delivery->jobId()] = $delivery;
+
+        return $delivery;
     }
 
-    /** The ACK (or the NACK) arrived: the job is no longer our problem. */
-    public function release(Job $job): void
+    /**
+     * Whether this delivery is still the one entitled to answer.
+     *
+     * False for a delivery whose deadline expired and whose job was handed
+     * out again, and false for one whose job has already been resolved -
+     * both are answers nobody is waiting for.
+     */
+    public function isCurrent(Delivery $delivery): bool
     {
-        $id = $job->getId()->toString();
-        unset($this->deadlines[$id], $this->processing[$id]);
+        return ($this->current[$delivery->jobId()] ?? null)?->is($delivery) ?? false;
+    }
+
+    /**
+     * The ACK (or the NACK) arrived: the lease is discharged.
+     *
+     * A delivery that is no longer current releases nothing. That guard is
+     * load-bearing - releasing on a stale answer would drop the LIVE
+     * delivery's lease and leave a job in flight with no deadline that
+     * could ever bring it back.
+     */
+    public function release(Delivery $delivery): void
+    {
+        if ($this->isCurrent($delivery)) {
+            unset($this->current[$delivery->jobId()]);
+        }
     }
 
     public function isProcessing(Job $job): bool
     {
-        return isset($this->processing[$job->getId()->toString()]);
+        return isset($this->current[$job->getId()->toString()]);
     }
 
     /** How many jobs are in a worker's hands right now, unacknowledged. */
     public function size(): int
     {
-        return count($this->processing);
+        return count($this->current);
     }
 
     /**
@@ -90,21 +132,29 @@ final class VisibilityMonitor
      * expire.
      *
      * A linear scan, unlike DelayedJobScheduler's O(1) answer, and that is
-     * fine: this set never holds more than one job per worker, so it is
+     * fine: this set never holds more than one delivery per worker, so it is
      * bounded by the pool size rather than by the queue depth.
      */
     public function nextDeadline(): ?float
     {
-        return $this->deadlines === [] ? null : min($this->deadlines);
+        $deadlines = [];
+
+        foreach ($this->current as $delivery) {
+            if ($delivery->getDeadline() !== null) {
+                $deadlines[] = $delivery->getDeadline();
+            }
+        }
+
+        return $deadlines === [] ? null : min($deadlines);
     }
 
     /**
-     * Every job whose ACK is overdue, moved back to READY and dropped from
-     * the monitor. The caller is responsible for actually returning them to
-     * a queue - see JobDispatcher::requeueExpired().
+     * Every job whose ACK is overdue, moved back to READY and stripped of
+     * its lease. The caller returns them to a queue - see
+     * JobDispatcher::requeueExpired().
      *
-     * A job with no deadline (dispatched while the timeout was null) is
-     * never overdue.
+     * Dropping the lease here is what makes the old worker's eventual
+     * answer stale rather than authoritative.
      *
      * @return list<Job>
      */
@@ -114,11 +164,11 @@ final class VisibilityMonitor
 
         $expired = [];
 
-        foreach ($this->processing as $id => $job) {
-            if (($this->deadlines[$id] ?? INF) <= $now) {
-                $job->markRetry($now);
-                $expired[] = $job;
-                unset($this->deadlines[$id], $this->processing[$id]);
+        foreach ($this->current as $id => $delivery) {
+            if ($delivery->isOverdue($now)) {
+                $delivery->getJob()->markRetry($now);
+                $expired[] = $delivery->getJob();
+                unset($this->current[$id]);
             }
         }
 

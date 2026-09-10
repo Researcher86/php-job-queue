@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Worker;
 
 use App\Job\Job;
+use App\Tests\Support\Deliveries;
 use App\Tests\Support\Handlers;
 use App\Worker\Worker;
 use App\Worker\WorkerDiedException;
@@ -33,7 +34,7 @@ final class WorkerTest extends TestCase
         $worker->spawn();
 
         $job = Job::create(type: 'send_email');
-        $worker->assign($job);
+        $worker->assign(Deliveries::to($worker, $job));
         $outcome = $worker->collect(null);
 
         $this->assertNotNull($outcome);
@@ -51,7 +52,7 @@ final class WorkerTest extends TestCase
         });
         $worker->spawn();
 
-        $worker->assign(Job::create(type: 'test'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
         $outcome = $worker->collect(null);
 
         $this->assertNotNull($outcome);
@@ -69,7 +70,7 @@ final class WorkerTest extends TestCase
         $worker->spawn();
 
         $job = Job::create(type: 'test');
-        $worker->assign($job);
+        $worker->assign(Deliveries::to($worker, $job));
 
         $this->assertSame(WorkerState::BUSY, $worker->getState());
         $this->assertTrue($worker->isBusy());
@@ -89,8 +90,8 @@ final class WorkerTest extends TestCase
         $worker = new Worker(1, Handlers::succeeds());
         $worker->spawn();
 
-        $worker->assign(Job::create(type: 'a'));
-        $worker->assign(Job::create(type: 'b'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'a')));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'b')));
 
         $worker->shutdown();
     }
@@ -100,7 +101,7 @@ final class WorkerTest extends TestCase
         $this->expectException(LogicException::class);
 
         $worker = new Worker(1, Handlers::succeeds());
-        $worker->assign(Job::create(type: 'a'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'a')));
     }
 
     public function testWorkerCrashIsDetected(): void
@@ -111,7 +112,7 @@ final class WorkerTest extends TestCase
         $worker->spawn();
 
         $job = Job::create(type: 'test');
-        $worker->assign($job);
+        $worker->assign(Deliveries::to($worker, $job));
         posix_kill($worker->getPid(), SIGKILL);
 
         $outcome = $worker->collect(null);
@@ -161,7 +162,7 @@ final class WorkerTest extends TestCase
             usleep(100_000);
         });
         $worker->spawn();
-        $worker->assign(Job::create(type: 'slow'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'slow')));
 
         posix_kill($worker->getPid(), SIGKILL);
         $this->waitForExit($worker->getPid());
@@ -186,7 +187,7 @@ final class WorkerTest extends TestCase
         $this->waitForExit($worker->getPid());
 
         try {
-            $worker->assign(Job::create(type: 'a'));
+            $worker->assign(Deliveries::to($worker, Job::create(type: 'a')));
             $this->fail('Expected the assign to report a dead worker');
         } catch (WorkerDiedException) {
             $this->assertTrue($worker->isDead());
@@ -224,7 +225,7 @@ final class WorkerTest extends TestCase
         });
         $worker->spawn();
 
-        $worker->assign(Job::create(type: 'test'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
         $worker->drain();
 
         $outcome = $worker->collect(null);
@@ -288,7 +289,7 @@ final class WorkerTest extends TestCase
         $worker->spawn();
         $pid = $worker->getPid();
 
-        $worker->assign(Job::create(type: 'slow'));
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'slow')));
 
         // Close our end while the handler is still running: the child's
         // write will fail when it finishes.

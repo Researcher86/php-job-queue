@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace App\Dispatcher;
 
+use App\Delivery\Delivery;
 use App\DLQ\DeadLetterQueue;
 use App\Job\Job;
-use App\Job\JobState;
 use App\Metrics\MetricsCollector;
 use App\Metrics\QueueMetrics;
 use App\Persistence\JobStorage;
@@ -64,9 +64,6 @@ final class JobDispatcher
     private readonly VisibilityMonitor $monitor;
 
     private bool $accepting = true;
-
-    /** @var array<string, float> */
-    private array $startedAt = [];
 
     public function __construct(
         private readonly Queue $queue,
@@ -346,10 +343,14 @@ final class JobDispatcher
      * Hands one job to one worker, and returns whether it got there.
      *
      * The order matters and is the invariant of PLAN.md Phase 5: the job is
-     * marked PROCESSING and registered with the visibility monitor BEFORE
-     * it is written to the socket, so there is no instant at which the job
-     * is neither in the queue nor accounted for as in flight. A job must
-     * not be able to fall between the two.
+     * marked PROCESSING and leased from the visibility monitor BEFORE it is
+     * written to the socket, so there is no instant at which the job is
+     * neither in the queue nor accounted for as in flight. A job must not
+     * be able to fall between the two.
+     *
+     * The lease - a Delivery - is what the worker holds and what its answer
+     * will be attributed to. Issuing it here, after markProcessing(), is
+     * what settles its generation.
      *
      * If the worker turns out to be dead (killed while idle, too recently
      * for maintain() to have noticed), the job comes straight back to the
@@ -368,8 +369,7 @@ final class JobDispatcher
         $availableAt = $job->getAvailableAt();
 
         $job->markProcessing();
-        $this->monitor->track($job);
-        $this->recordStart($job);
+        $delivery = $this->monitor->track($job, $worker->getId());
 
         if ($availableAt !== null) {
             $this->metrics?->recordLatency(
@@ -379,10 +379,9 @@ final class JobDispatcher
         }
 
         try {
-            $worker->assign($job);
+            $worker->assign($delivery);
         } catch (WorkerDiedException) {
-            $this->monitor->release($job);
-            $this->takeStart($job);
+            $this->monitor->release($delivery);
             $job->markRetry($this->clock->now());
             $this->queue->push($job);
             $this->workerPool->maintain();
@@ -395,26 +394,39 @@ final class JobDispatcher
 
     private function applyResult(WorkerOutcome $outcome): void
     {
-        $job = $outcome->getJob();
+        $delivery = $outcome->getDelivery();
 
-        // A late answer for a job the queue has already resolved. It
-        // happens without anything going wrong: the visibility timeout
-        // expired while the handler was still running, the job was handed
-        // to a second worker, and now the first one has finished and is
-        // reporting on a delivery nobody is waiting for any more.
+        // The fence. An answer is only authoritative for the delivery that
+        // is still holding the lease.
         //
-        // Ignored rather than applied, and deliberately without releasing
-        // the monitor: what it tracks under this job's id is the LIVE
-        // delivery, and releasing here would leave that one untracked -
-        // turning a harmless duplicate into a genuinely lost job.
-        if ($job->getState() !== JobState::PROCESSING) {
+        // A stale answer happens without anything going wrong: the
+        // visibility deadline passed while the handler was still running,
+        // the job was handed to a second worker, and now the first one has
+        // finished and is reporting on a lease that has been revoked. It is
+        // also what an answer looks like for a job that has already been
+        // resolved.
+        //
+        // Checking the JOB'S STATE instead of the delivery does not work,
+        // and this is not a hypothetical - it was the bug this replaced.
+        // By the time the late answer arrives the job genuinely IS
+        // PROCESSING, because the second worker put it there. The obsolete
+        // answer was therefore accepted: it completed a job the live worker
+        // was still running, released the LIVE delivery's lease (leaving a
+        // job in flight with no deadline that could bring it back), and the
+        // live worker's real answer - a failure - was then discarded as
+        // stale. See Delivery.
+        //
+        // Nothing is released here, on purpose. The lease belongs to the
+        // live delivery.
+        if (!$this->monitor->isCurrent($delivery)) {
             $this->metrics?->increment(MetricsCollector::STALE_ACKS);
 
             return;
         }
 
+        $job = $delivery->getJob();
         $result = $outcome->getResult();
-        $this->monitor->release($job);
+        $this->monitor->release($delivery);
 
         if ($result === null) {
             $job->markRetry($this->clock->now());
@@ -423,11 +435,10 @@ final class JobDispatcher
             return;
         }
 
-        $startedAt = $this->takeStart($job);
-
-        if ($startedAt !== null) {
-            $this->metrics?->recordLatency(MetricsCollector::LATENCY_EXECUTION, $this->clock->now() - $startedAt);
-        }
+        $this->metrics?->recordLatency(
+            MetricsCollector::LATENCY_EXECUTION,
+            $this->clock->now() - $delivery->getDispatchedAt(),
+        );
 
         if ($result->isSuccess()) {
             $job->markCompleted();
@@ -466,25 +477,5 @@ final class JobDispatcher
     private function persist(Job $job): void
     {
         $this->storage?->store($job->getId()->toString(), $job->toArray());
-    }
-
-    private function recordStart(Job $job): void
-    {
-        $this->startedAt[$job->getId()->toString()] = $this->clock->now();
-    }
-
-    /**
-     * When this job was dispatched, per the injected clock, removing the
-     * record. Null for a job dispatched by something other than this
-     * dispatcher - a test driving a Worker directly - which simply has no
-     * execution latency to report.
-     */
-    private function takeStart(Job $job): ?float
-    {
-        $id = $job->getId()->toString();
-        $startedAt = $this->startedAt[$id] ?? null;
-        unset($this->startedAt[$id]);
-
-        return $startedAt;
     }
 }

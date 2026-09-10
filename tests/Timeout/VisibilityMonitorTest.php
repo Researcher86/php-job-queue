@@ -26,7 +26,7 @@ final class VisibilityMonitorTest extends TestCase
         $job->markReady(1000.0);
         $job->markProcessing();
 
-        $monitor->track($job);
+        $monitor->track($job, 1);
 
         $this->assertTrue($monitor->isProcessing($job));
     }
@@ -43,7 +43,7 @@ final class VisibilityMonitorTest extends TestCase
         $job = Job::create(type: 'a');
         $job->markReady(1000.0);
         $job->markProcessing();
-        $monitor->track($job);
+        $monitor->track($job, 1);
 
         $this->assertTrue($monitor->isProcessing($job));
         $this->assertSame(1, $monitor->size());
@@ -59,14 +59,12 @@ final class VisibilityMonitorTest extends TestCase
         $monitor = new VisibilityMonitor(30, $this->clock);
         $this->assertSame(0, $monitor->size());
 
-        $first = $this->processingJob('a');
-        $second = $this->processingJob('b');
-        $monitor->track($first);
-        $monitor->track($second);
+        $firstDelivery = $monitor->track($this->processingJob('a'), 1);
+        $monitor->track($this->processingJob('b'), 2);
 
         $this->assertSame(2, $monitor->size());
 
-        $monitor->release($first);
+        $monitor->release($firstDelivery);
 
         $this->assertSame(1, $monitor->size());
     }
@@ -78,8 +76,8 @@ final class VisibilityMonitorTest extends TestCase
         $job->markReady(1000.0);
         $job->markProcessing();
 
-        $monitor->track($job);
-        $monitor->release($job);
+        $delivery = $monitor->track($job, 1);
+        $monitor->release($delivery);
 
         $this->assertFalse($monitor->isProcessing($job));
     }
@@ -90,7 +88,7 @@ final class VisibilityMonitorTest extends TestCase
         $job = Job::create(type: 'a');
         $job->markReady(1000.0);
         $job->markProcessing();
-        $monitor->track($job);
+        $monitor->track($job, 1);
 
         $this->clock->advance(29.0);
 
@@ -104,7 +102,7 @@ final class VisibilityMonitorTest extends TestCase
         $job = Job::create(type: 'a');
         $job->markReady(1000.0);
         $job->markProcessing();
-        $monitor->track($job);
+        $monitor->track($job, 1);
 
         $this->clock->advance(30.0);
         $expired = $monitor->requeueExpired();
@@ -123,11 +121,11 @@ final class VisibilityMonitorTest extends TestCase
         $soon->markReady(1000.0);
         $later->markReady(1000.0);
         $soon->markProcessing();
-        $monitor->track($soon);
+        $monitor->track($soon, 1);
 
         $this->clock->advance(10.0);
         $later->markProcessing();
-        $monitor->track($later);
+        $monitor->track($later, 1);
 
         $this->clock->advance(20.0);
         $expired = $monitor->requeueExpired();
@@ -144,5 +142,77 @@ final class VisibilityMonitorTest extends TestCase
         $job->markProcessing();
 
         return $job;
+    }
+
+    /**
+     * The fence. A delivery whose deadline expired stops being current the
+     * moment the job is handed out again, so its late answer is refusable.
+     */
+    public function testAnExpiredDeliveryIsNoLongerCurrentOnceTheJobIsReissued(): void
+    {
+        $monitor = new VisibilityMonitor(30, $this->clock);
+        $job = $this->processingJob('slow');
+
+        $first = $monitor->track($job, 1);
+        $this->assertTrue($monitor->isCurrent($first));
+
+        $this->clock->advance(31.0);
+        $this->assertSame([$job], $monitor->requeueExpired());
+        $this->assertFalse($monitor->isCurrent($first), 'the lease was revoked');
+
+        // Handed out again - a new delivery, a new generation.
+        $job->markProcessing();
+        $second = $monitor->track($job, 2);
+
+        $this->assertTrue($monitor->isCurrent($second));
+        $this->assertFalse($monitor->isCurrent($first), 'and the old one stays revoked');
+    }
+
+    /**
+     * Releasing on a stale answer would drop the LIVE delivery's lease and
+     * leave a job in flight with nothing that could reclaim it.
+     */
+    public function testAStaleDeliveryReleasesNothing(): void
+    {
+        $monitor = new VisibilityMonitor(30, $this->clock);
+        $job = $this->processingJob('slow');
+
+        $first = $monitor->track($job, 1);
+        $this->clock->advance(31.0);
+        $monitor->requeueExpired();
+
+        $job->markProcessing();
+        $second = $monitor->track($job, 2);
+
+        $monitor->release($first);
+
+        $this->assertTrue($monitor->isCurrent($second), 'the live lease survived');
+        $this->assertSame(1, $monitor->size());
+
+        $monitor->release($second);
+
+        $this->assertSame(0, $monitor->size());
+    }
+
+    public function testADeliveryForAnUntrackedJobIsNotCurrent(): void
+    {
+        $monitor = new VisibilityMonitor(30, $this->clock);
+        $delivery = $monitor->track($this->processingJob('a'), 1);
+
+        $monitor->release($delivery);
+
+        $this->assertFalse($monitor->isCurrent($delivery));
+    }
+
+    public function testNextDeadlineIsTheEarliestLease(): void
+    {
+        $monitor = new VisibilityMonitor(30, $this->clock);
+        $this->assertNull($monitor->nextDeadline());
+
+        $monitor->track($this->processingJob('a'), 1);
+        $this->clock->advance(5.0);
+        $monitor->track($this->processingJob('b'), 2);
+
+        $this->assertSame(1030.0, $monitor->nextDeadline());
     }
 }
