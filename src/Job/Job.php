@@ -26,6 +26,7 @@ final class Job
         private readonly int $maxAttempts,
         private readonly float $createdAt,
         private readonly JobPriority $priority,
+        private readonly ?string $idempotencyKey,
         JobState $state,
         int $attempts = 0,
         ?float $availableAt = null,
@@ -44,6 +45,7 @@ final class Job
         int $maxAttempts = 3,
         ?Clock $clock = null,
         JobPriority $priority = JobPriority::NORMAL,
+        ?string $idempotencyKey = null,
     ): self {
         $clock ??= new SystemClock();
 
@@ -54,6 +56,7 @@ final class Job
             maxAttempts: $maxAttempts,
             createdAt: $clock->now(),
             priority: $priority,
+            idempotencyKey: $idempotencyKey,
             state: JobState::CREATED,
         );
     }
@@ -99,6 +102,11 @@ final class Job
         return $this->createdAt;
     }
 
+    public function getIdempotencyKey(): ?string
+    {
+        return $this->idempotencyKey;
+    }
+
     public function getAvailableAt(): ?float
     {
         return $this->availableAt;
@@ -117,6 +125,7 @@ final class Job
             'createdAt' => $this->createdAt,
             'availableAt' => $this->availableAt,
             'priority' => $this->priority->name,
+            'idempotencyKey' => $this->idempotencyKey,
         ];
     }
 
@@ -132,6 +141,7 @@ final class Job
             maxAttempts: (int) $data['maxAttempts'],
             createdAt: (float) $data['createdAt'],
             priority: JobPriority::fromName((string) ($data['priority'] ?? 'NORMAL')),
+            idempotencyKey: isset($data['idempotencyKey']) ? (string) $data['idempotencyKey'] : null,
             state: JobState::fromName((string) $data['state']),
             attempts: (int) ($data['attempts'] ?? 0),
             availableAt: isset($data['availableAt']) ? (float) $data['availableAt'] : null,

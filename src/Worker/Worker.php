@@ -93,11 +93,8 @@ final class Worker
             throw new LogicException('Cannot assign a job to a worker that is not idle');
         }
 
-        $payload = base64_encode(serialize($job->toArray())) . "\n";
-        if (@fwrite($this->stream, $payload) === false) {
-            $this->markDead();
-            throw new RuntimeException("Failed to send job to worker {$this->id}");
-        }
+        $payload = json_encode($job->toArray(), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        self::writeAll($this->stream, $payload);
 
         $this->currentJob = $job;
         $this->assignedAt = microtime(true);
@@ -118,7 +115,6 @@ final class Worker
             return null;
         }
 
-        $line = fgets($this->stream);
         $job = $this->currentJob;
         $startedAt = $this->assignedAt;
         $this->currentJob = null;
@@ -128,13 +124,26 @@ final class Worker
             throw new LogicException('Worker returned without an assigned job');
         }
 
-        if ($line === false) {
+        $payload = self::readExact($this->stream, 4);
+        if ($payload === false) {
             $this->apply('die');
             return new WorkerOutcome($job, null, $startedAt);
         }
 
-        $result = unserialize(base64_decode(trim($line)), ['allowed_classes' => true]);
-        $outcome = new WorkerOutcome($job, $this->decodeResult($result), $startedAt);
+        $unpacked = unpack('N', $payload);
+        if ($unpacked === false) {
+            $this->apply('die');
+            return new WorkerOutcome($job, null, $startedAt);
+        }
+
+        $body = self::readExact($this->stream, $unpacked[1]);
+        if ($body === false) {
+            $this->apply('die');
+            return new WorkerOutcome($job, null, $startedAt);
+        }
+
+        $data = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
+        $outcome = new WorkerOutcome($job, $this->decodeResult($data), $startedAt);
 
         $this->apply('finish');
         if ($this->draining) {
@@ -235,13 +244,23 @@ final class Worker
     private function workerLoop(mixed $stream): void
     {
         while (true) {
-            $line = fgets($stream);
-            if ($line === false || trim($line) === '') {
+            $payload = self::readExact($stream, 4);
+            if ($payload === false) {
+                return;
+            }
+
+            $unpacked = unpack('N', $payload);
+            if ($unpacked === false || $unpacked[1] === 0) {
+                return;
+            }
+
+            $body = self::readExact($stream, $unpacked[1]);
+            if ($body === false) {
                 return;
             }
 
             try {
-                $data = unserialize(base64_decode(trim($line)), ['allowed_classes' => true]);
+                $data = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
                 $job = Job::fromArray($data);
 
                 try {
@@ -255,7 +274,8 @@ final class Worker
                 $result = JobResult::failure($e);
             }
 
-            fwrite($stream, base64_encode(serialize($this->encodeResult($result))) . "\n");
+            $response = json_encode($this->encodeResult($result), JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+            self::writeAll($stream, $response);
         }
     }
 
@@ -305,5 +325,50 @@ final class Worker
             ));
         }
         $this->state = $next;
+    }
+
+    /**
+     * Length-prefixed write: guarantees the entire buffer is sent.
+     *
+     * Frame format: [4-byte big-endian length][payload]
+     */
+    private static function writeAll(mixed $stream, string $data): void
+    {
+        $length = strlen($data);
+        $header = pack('N', $length);
+
+        $total = 0;
+        $buffer = $header . $data;
+        $bytes = strlen($buffer);
+
+        while ($total < $bytes) {
+            $written = @fwrite($stream, substr($buffer, $total));
+            if ($written === false || $written === 0) {
+                throw new RuntimeException('Failed to write to worker stream');
+            }
+            $total += $written;
+        }
+    }
+
+    /**
+     * Length-prefixed read: guarantees exactly N bytes are read.
+     *
+     * Returns false on premature EOF (worker crash / broken pipe).
+     */
+    private static function readExact(mixed $stream, int $length): string|false
+    {
+        $buffer = '';
+        $remaining = $length;
+
+        while ($remaining > 0) {
+            $chunk = fread($stream, $remaining);
+            if ($chunk === false || $chunk === '') {
+                return false;
+            }
+            $buffer .= $chunk;
+            $remaining -= strlen($chunk);
+        }
+
+        return $buffer;
     }
 }

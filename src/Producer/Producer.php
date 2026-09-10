@@ -24,12 +24,14 @@ final readonly class Producer
         int $maxAttempts = 3,
         int $delay = 0,
         JobPriority $priority = JobPriority::NORMAL,
+        ?string $idempotencyKey = null,
     ): Job {
         $job = $this->jobFactory->create(
             type: $type,
             payload: $payload,
             maxAttempts: $maxAttempts,
             priority: $priority,
+            idempotencyKey: $idempotencyKey,
         );
 
         $this->queue->push($job, $delay);

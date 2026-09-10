@@ -26,6 +26,7 @@ final class JobFactory
         array $payload = [],
         int $maxAttempts = 3,
         JobPriority $priority = JobPriority::NORMAL,
+        ?string $idempotencyKey = null,
     ): Job {
         return Job::create(
             type: $type,
@@ -33,6 +34,7 @@ final class JobFactory
             maxAttempts: $maxAttempts,
             clock: $this->clock,
             priority: $priority,
+            idempotencyKey: $idempotencyKey,
         );
     }
 }

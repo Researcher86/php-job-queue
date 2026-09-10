@@ -35,3 +35,6 @@ docker-analyse: up
 
 docker-run: up
 	docker compose exec php php bin/run.php
+
+docker-run-debug: up
+	docker compose exec php bash -c "XDEBUG_TRIGGER=1 php bin/run.php"
