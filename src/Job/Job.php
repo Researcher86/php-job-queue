@@ -17,29 +17,32 @@ use LogicException;
  * between a job that HAS a state and a job that IS in a state: there is no
  * path by which a COMPLETED job quietly becomes PROCESSING again.
  *
- *                  ┌─────────┐
- *                  │ CREATED │
- *                  └────┬────┘
- *          markDelayed()│  │markReady()
- *                  ┌────▼──┐│
- *                  │DELAYED││   deadline passes
- *                  └────┬──┘│   (markReady)
- *                       └───┤
- *                      ┌────▼───┐
- *              ┌──────►│ READY  │◄──────────┐
- *              │       └────┬───┘           │
- *              │            │markProcessing()   markRequeued()
- *              │       ┌────▼───────┐       │   (a DLQ record, by hand)
- *              │       │ PROCESSING │       │
- *              │       └──┬──┬──┬───┘       │
- *  markRetry() │          │  │  │           │
- *  (attempts   └──────────┘  │  └───────────┼──┐
- *   left, or a              │markCompleted()│  │markFailed()
- *   visibility          ┌───▼──────┐    ┌───┴──▼─┐
- *   timeout)            │COMPLETED │    │ FAILED │
- *                       └──────────┘    └────────┘
- *                        (terminal)      (terminal, and where the
- *                                         DLQ record comes from)
+ *   ┌─────────┐   markDelayed()   ┌─────────┐
+ *   │ CREATED │──────────────────►│ DELAYED │
+ *   └────┬────┘                   └────┬────┘
+ *        │ markReady()                 │ markReady()
+ *        │                             │ (deadline passed)
+ *        ▼                             │
+ *   ┌─────────┐◄───────────────────────┘
+ *   │  READY  │◄──────────────┐◄──────────────┐
+ *   └────┬────┘               │               │
+ *        │ markProcessing()   │ markRetry()   │ markRequeued()
+ *        ▼                    │               │
+ *   ┌──────────────┐          │               │
+ *   │  PROCESSING  │──────────┘               │
+ *   └───┬──────┬───┘   NACK with attempts     │
+ *       │      │       left, or an expired    │
+ *       │      │       visibility deadline    │
+ *       │      │ markFailed()                 │
+ *       │      ▼                              │
+ *       │  ┌────────┐                         │
+ *       │  │ FAILED │─────────────────────────┘
+ *       │  └────────┘   a human retries a DLQ record
+ *       │ markCompleted()
+ *       ▼
+ *   ┌───────────┐
+ *   │ COMPLETED │
+ *   └───────────┘
  *
  * Two arrows into READY that look like one and are not:
  *
@@ -75,14 +78,14 @@ final class Job
      * means editing one place and immediately seeing every event it has to
      * answer for.
      *
-     *   FROM         ready     delay     dispatch    complete   fail     retry   requeue
-     *   ──────────────────────────────────────────────────────────────────────────────────
-     *   CREATED      READY     DELAYED   -           -          -        -       -
-     *   DELAYED      READY     -         -           -          -        -       -
-     *   READY        -         -          PROCESSING -          -        -       -
-     *   PROCESSING   -         -         -           COMPLETED  FAILED   READY   -
-     *   COMPLETED    -         -         -           -          -        -       -
-     *   FAILED       -         -         -           -          -        -       READY
+     *   FROM        ready     delay     dispatch    complete   fail     retry   requeue
+     *   ───────────────────────────────────────────────────────────────────────────────
+     *   CREATED     READY     DELAYED   -           -          -        -       -
+     *   DELAYED     READY     -         -           -          -        -       -
+     *   READY       -         -         PROCESSING  -          -        -       -
+     *   PROCESSING  -         -         -           COMPLETED  FAILED   READY   -
+     *   COMPLETED   -         -         -           -          -        -       -
+     *   FAILED      -         -         -           -          -        -       READY
      *
      * @var array<string, array<string, JobState>>
      */

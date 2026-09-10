@@ -29,29 +29,31 @@ something one of those two calls.
 ## Processes and what lives where
 
 ```text
-┌─────────────────────────────────── one PHP process ──────────────────────┐
-│                                                                          │
-│  Producer ──► Queue ──► JobDispatcher ──► WorkerPool                     │
-│                 │            │                │                         │
-│                 │            ├── VisibilityMonitor   (in-flight jobs)    │
-│                 │            ├── RetryPolicy                            │
-│                 │            ├── DeadLetterQueue                        │
-│                 │            ├── JobStorage          (append-only log)   │
-│                 │            └── MetricsCollector                       │
-│                 │                                                        │
-│                 └── DelayedJobScheduler               (min-heap)          │
-│                                                                          │
-│  QueueRuntime drives all of it, and owns the signal handlers             │
-└──────────────────────────────────┬───────────────────────────────────────┘
-                                   │  socket pair per worker
-              ┌────────────────────┼────────────────────┐
-              ▼                    ▼                    ▼
-   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
-   │ forked process   │ │ forked process   │ │ forked process   │
-   │ Worker::workerLoop() — read frame, run the handler, write   │
-   │ the result, repeat until EOF                                │
-   └──────────────────┘ └──────────────────┘ └──────────────────┘
+┌─────────────────────────── one PHP process ────────────────────────────┐
+│                                                                        │
+│  Producer ──► Queue ──► JobDispatcher ──► WorkerPool                   │
+│                 │            │                                         │
+│                 │            ├── VisibilityMonitor   (in-flight jobs)  │
+│                 │            ├── RetryPolicy                           │
+│                 │            ├── DeadLetterQueue                       │
+│                 │            ├── JobStorage          (append-only log) │
+│                 │            └── MetricsCollector                      │
+│                 │                                                      │
+│                 └── DelayedJobScheduler              (min-heap)        │
+│                                                                        │
+│  QueueRuntime drives the loop, and owns the signal handlers            │
+│                                                                        │
+└────────────────────────────────────┬───────────────────────────────────┘
+                                     │  one socket pair per worker
+               ┌─────────────────────┼─────────────────────┐
+               ▼                     ▼                     ▼
+      ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+      │ forked worker    │  │ forked worker    │  │ forked worker    │
+      └──────────────────┘  └──────────────────┘  └──────────────────┘
 ```
+
+Each worker runs `Worker::workerLoop()`: read a frame, run the handler,
+write the result, repeat until the socket closes.
 
 Everything that decides anything is in the parent. A worker holds no queue
 state, no attempt counters, and no opinion about retries — it receives a
@@ -187,11 +189,11 @@ QueueRuntime::tick()
    │           └─ Worker::assign()           4-byte length + JSON, on the socket
    │
    └─ JobDispatcher::collect($wait)
-         └─ WorkerPool::poll($wait)
-               ├─ stream_select over every WORKING worker's socket
-               └─ Worker::collect(0.0)
-                     ├─ readFrame()          length prefix, then exactly N bytes
-                     └─ apply('finish')      BUSY → IDLE
+         ├─ WorkerPool::poll($wait)
+         │     ├─ stream_select over every WORKING worker's socket
+         │     └─ Worker::collect(0.0)
+         │           ├─ readFrame()   length prefix, then exactly N bytes
+         │           └─ apply('finish') BUSY → IDLE
          │
          └─ applyResult($outcome)
                ├─ state is PROCESSING?        no → stale ACK, counted, ignored
@@ -210,7 +212,7 @@ workerLoop()
    ├─ Job::fromArray()                a copy, in this process
    ├─ ($handler)($job)                ordinary code, throws or returns
    ├─ JobResult::success() / failure($e)
-   └─ writeAll({success, exceptionClass, exceptionMessage})
+   ├─ writeAll({success, exceptionClass, exceptionMessage})
    └─ repeat, until the socket closes
 ```
 
@@ -436,7 +438,7 @@ SIGTERM
              ├─ accepting = false         dispatchPending() now returns 0
              ├─ WorkerPool::drain()
              │    ├─ IDLE workers    → apply('drain') → STOPPING, socket closed
-             │    └─ working workers → apply('drain') → DRAINING, left alone
+             │    ├─ working workers → apply('drain') → DRAINING, left alone
              │    └─ pool.draining = true   (so nothing gets replaced)
              │
              ├─ while busyCount() > 0 and grace remains:

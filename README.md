@@ -87,20 +87,20 @@ PHP 8.5 with `pcntl` and `posix` locally.
         └───────┬──────┘
                 ▼
         ┌──────────────┐        ┌───────────────────────┐
-        │    Queue     │◄───────│ DelayedJobScheduler   │  min-heap of
+        │    Queue     │◄───────│  DelayedJobScheduler  │  min-heap of
         │  ready jobs  │        │ (delays and backoff)  │  deadlines
         └───────┬──────┘        └───────────────────────┘
                 ▼
         ┌──────────────┐        ┌───────────────────────┐
-        │  Dispatcher  │───────►│  VisibilityMonitor    │  in-flight jobs
+        │  Dispatcher  │───────►│   VisibilityMonitor   │  in-flight jobs
         └───────┬──────┘        │  and their deadlines  │  and their ACK
                 │               └───────────────────────┘  deadlines
     ┌───────────┼───────────┐
     ▼           ▼           ▼
- Worker      Worker      Worker      each a forked process
+  Worker      Worker      Worker     each a forked process
     │           │           │
     ▼           ▼           ▼
- Handler     Handler     Handler
+  Handler     Handler     Handler
     │
     ├──── ACK ─────► COMPLETED
     │
@@ -125,27 +125,32 @@ question.
 ## A job's life
 
 ```text
-                 ┌─────────┐
-                 │ CREATED │
-                 └────┬────┘
-      markDelayed()   │   markReady()
-                 ┌────▼──┐│
-                 │DELAYED││
-                 └────┬──┘│
-                      └───┤ deadline passes
-                     ┌────▼───┐
-             ┌──────►│ READY  │◄──────────────┐
-             │       └────┬───┘               │ markRequeued()
-             │            │ markProcessing()  │ (a human retries
-             │       ┌────▼───────┐           │  a DLQ record)
-             │       │ PROCESSING │           │
-             │       └──┬──┬───┬──┘           │
-  markRetry()│          │  │   │              │
-  (NACK with └──────────┘  │   └──────────────┼──┐
-   attempts left, or       │ markCompleted()  │  │ markFailed()
-   an expired          ┌───▼──────┐       ┌───┴──▼─┐
-   visibility          │COMPLETED │       │ FAILED │
-   timeout)            └──────────┘       └────────┘
+  ┌─────────┐   markDelayed()   ┌─────────┐
+  │ CREATED │──────────────────►│ DELAYED │
+  └────┬────┘                   └────┬────┘
+       │ markReady()                 │ markReady()
+       │                             │ (deadline passed)
+       ▼                             │
+  ┌─────────┐◄───────────────────────┘
+  │  READY  │◄──────────────┐◄──────────────┐
+  └────┬────┘               │               │
+       │ markProcessing()   │ markRetry()   │ markRequeued()
+       ▼                    │               │
+  ┌──────────────┐          │               │
+  │  PROCESSING  │──────────┘               │
+  └───┬──────┬───┘   NACK with attempts     │
+      │      │       left, or an expired    │
+      │      │       visibility deadline    │
+      │      │ markFailed()                 │
+      │      ▼                              │
+      │  ┌────────┐                         │
+      │  │ FAILED │─────────────────────────┘
+      │  └────────┘   a human retries a DLQ record
+      │ markCompleted()
+      ▼
+  ┌───────────┐
+  │ COMPLETED │
+  └───────────┘
 ```
 
 The states are a real state machine, not a label: every transition goes
@@ -260,14 +265,14 @@ format is stated once.
 
 ```text
 STARTING ──spawn──► IDLE ──assign──► BUSY ──finish──► IDLE
-                     │                 │
-                  drain│            drain│
-                     ▼                 ▼
-                 STOPPING          DRAINING ──finish──► STOPPING
-                                       (still working,
-                                        no new work)
+                      │                │
+                drain │          drain │
+                      ▼                ▼
+                  STOPPING         DRAINING ──finish──► STOPPING
+                                    (still working here,
+                                     but no new work)
 
-any state ──die──► DEAD  (terminal)
+any state ──die──► DEAD   (terminal)
 ```
 
 Two things are tracked separately, and the distinction matters:
