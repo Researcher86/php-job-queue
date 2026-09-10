@@ -257,9 +257,19 @@ anything the system itself wrote. It was covered only by a test that
 appended the record by hand, which is how it went unnoticed: the branch
 worked, nothing ever took it.
 
-**Cost:** one more append per dispatch, doubling the write volume for a
-job that succeeds first time. That is what durable attempt counting costs
-in a log-only design, and it is stated in the README rather than hidden.
+**Cost:** measured rather than estimated - `bin/bench.php` grew a storage
+argument for it. At 10,000 no-op jobs on 8 workers: 23,500/s with no
+storage, 21,000/s in memory, 18,100/s to a file, and exactly 3.0 records
+per job (READY, PROCESSING, outcome) for 8 MB of log. So durable attempt
+counting costs about a quarter of the throughput at this scale, and it is
+the 8 MB that argues for the snapshots this project does not have.
+
+**Related:** the rule that keeps the write volume at three records and not
+four is in `JobDispatcher::persist()` - the queue persists any job it takes
+in, the dispatcher persists only a state change that does not go into a
+queue. `DispatcherPersistenceTest` asserts the sequence per outcome,
+because a redundant record is not a correctness bug and nothing else would
+have complained: the retry path wrote READY twice until that test existed.
 
 ---
 

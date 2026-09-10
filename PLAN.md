@@ -1,6 +1,6 @@
 # PHP Job Queue — the plan it was built from
 
-> **Status: all 16 phases are done.** 230 tests, PHPStan level 8 clean.
+> **Status: all 16 phases are done.** 234 tests, PHPStan level 8 clean.
 >
 > This file is kept as the record of what was built, in what order, and what
 > each step was for - not as work outstanding. Every `[x]` names a test that
@@ -1870,6 +1870,19 @@ an assertion. Measured on the 8.5-cli image, no-op handlers, 8 workers:
 | 1,000 | 0.055s | 18,000/s | 4 MB | 23 ms | 0.08 ms |
 | 10,000 | 0.416s | 24,000/s | 12 MB | 215 ms | 0.14 ms |
 | 100,000 | 8.368s | 12,000/s | 96 MB | 5,129 ms | 0.30 ms |
+
+And what durability costs, at 10,000 jobs on 8 workers:
+
+| storage | throughput | log |
+|---|---:|---|
+| none | 23,500/s | - |
+| memory | 21,000/s | - |
+| file | 18,100/s | 30,000 records, 3.0 per job, 8 MB |
+
+Three records per job - READY, PROCESSING, and the outcome - with the
+middle one being what makes the attempt survive a crash. The 8 MB is the
+argument for the snapshots this project does not have: the log grows with
+every state change and `load()` replays all of it.
 
 Which is Phase 14's insight as a table: at 100,000 jobs the average job took
 five seconds and the average handler took a third of a millisecond. The jobs

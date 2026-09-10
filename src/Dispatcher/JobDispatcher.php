@@ -483,8 +483,10 @@ final class JobDispatcher
         if ($job->getAttempts() < $job->getMaxAttempts()) {
             $delay = $this->retryPolicy?->nextDelay($job) ?? 0;
             $job->markRetry($this->clock->now() + $delay);
+
+            // No persist() here: push() writes the job it takes in. See
+            // persist() for who owns which write.
             $this->queue->push($job);
-            $this->persist($job);
             $this->metrics?->increment(MetricsCollector::JOBS_RETRIED);
             return;
         }
@@ -498,6 +500,24 @@ final class JobDispatcher
         }
     }
 
+    /**
+     * Writes the job's current state to the log, if there is one.
+     *
+     * One rule decides who calls this, and it is worth stating because the
+     * two writers would otherwise duplicate each other: **the queue
+     * persists any job it takes in; the dispatcher persists only a state
+     * change that does not put the job into a queue.**
+     *
+     * So the dispatcher writes on three transitions - PROCESSING when a job
+     * is dispatched, and COMPLETED or FAILED when it is finished - and on
+     * none of the paths that end in push(), because Queue::push() has
+     * already written it. Getting that wrong is not a correctness bug,
+     * since the log is last-write-wins over identical content, but it did
+     * put a redundant READY record in the log on every retry.
+     *
+     * DispatcherPersistenceTest counts the records per outcome, so the
+     * duplication cannot come back unnoticed.
+     */
     private function persist(Job $job): void
     {
         $this->storage?->store($job->getId()->toString(), $job->toArray());

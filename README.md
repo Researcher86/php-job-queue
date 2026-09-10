@@ -22,7 +22,7 @@ Read  →  Run  →  Experiment  →  Break something  →  Observe  →  Unders
 
 ## Status
 
-All 16 phases of [PLAN.md](PLAN.md) are done, 230 tests, PHPStan level 8
+All 16 phases of [PLAN.md](PLAN.md) are done, 234 tests, PHPStan level 8
 clean.
 
 `Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
@@ -629,17 +629,45 @@ On restore:
 
 The PROCESSING row is the at-least-once bargain restated at the persistence
 layer, and it only works because the dispatcher writes the record when the
-job goes out, not only when it comes back. That write is what makes
+job goes **out**, not only when it comes back. That write is what makes
 `attempts` durable — without it the log's last word on an in-flight job is
 the READY record from `push()`, so a crash hands the job its whole
 allowance again and a job that reliably kills its worker loops across
-restarts forever instead of reaching the DLQ. The price is one more append
-per dispatch, which is what durable attempt counting costs in a log-only
-design.
+restarts forever instead of reaching the DLQ.
 
-The other cost is bounded replay: the log grows with every state change and
-`load()` replays all of it. A real system pairs this with periodic
-snapshots; this one does not, and says so.
+### Who writes what, and what it costs
+
+One rule keeps the two writers from duplicating each other: **the queue
+persists any job it takes in; the dispatcher persists only a state change
+that does not put the job into a queue.** So every outcome is exactly three
+records, and the middle one is the durable attempt:
+
+| outcome | records |
+|---|---|
+| success | `READY` → `PROCESSING` → `COMPLETED` |
+| failure, attempts left | `READY` → `PROCESSING` → `READY` |
+| failure, exhausted | `READY` → `PROCESSING` → `FAILED` |
+
+[`DispatcherPersistenceTest`](tests/Persistence/DispatcherPersistenceTest.php)
+asserts those sequences, because a redundant record is not a correctness
+bug — the log is last-write-wins over identical content — so nothing else
+would ever complain about one. The retry path did write `READY` twice until
+that test existed.
+
+Measured, 10,000 no-op jobs on 8 workers
+(`make docker-bench ARGS="10000 8 0 file"`):
+
+| storage | throughput | log |
+|---|---:|---|
+| `none` | 23,500/s | — |
+| `memory` | 21,000/s | — |
+| `file` | 18,100/s | 30,000 records, 3.0 per job, 8 MB |
+
+So durability costs about a quarter of the throughput here, and 8 MB of log
+per 10,000 trivial jobs. The second number is the one that matters: the log
+grows with every state change and `load()` replays all of it, unbounded. A
+real system pairs this with periodic snapshots and compaction; this one does
+not, and the number above is why that would be the next thing to build.
 
 ---
 

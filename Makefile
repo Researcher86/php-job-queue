@@ -27,7 +27,8 @@ run:
 run-worker:
 	php bin/worker.php
 
-# make bench ARGS="10000 8"  -> <jobs> <workers> <work-microseconds>
+# make bench ARGS="10000 8 0 file"
+#   -> <jobs> <workers> <work-microseconds> <none|memory|file>
 bench:
 	php bin/bench.php $(ARGS)
 
