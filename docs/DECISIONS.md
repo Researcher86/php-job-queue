@@ -72,6 +72,52 @@ whatever the heap's internal swaps produce. The sorted array had FIFO there,
 because PHP's sort has been stable since 8.0, and losing it would have been
 a silent regression.
 
+**And see decision 3a**, which is the same lesson applied to the set this
+one is not about. Getting the delayed set right while leaving the ready set
+on `array_shift()` left an O(n²) in the hot path for the whole of the
+project's life.
+
+---
+
+## 3a. The ready set is an SplQueue
+
+**Chosen:** `SplQueue` for the ready FIFO in `InMemoryQueue` and for each
+lane in `PriorityQueue`.
+
+**Rejected:** a plain array with `array_shift()`, which is what it was.
+
+**Why:** `array_shift()` reindexes the whole array. That is O(n) per pop, so
+draining n jobs is O(n²) - and it is the hot path, touched on every single
+pop. Popping a full queue with no workers involved:
+
+| pops | array_shift | SplQueue |
+|--------:|--------:|--------:|
+| 25,000 | 0.328s | 0.015s |
+| 50,000 | 1.191s | 0.029s |
+| 100,000 | 4.815s | 0.059s |
+| 200,000 | 19.602s | 0.116s |
+
+Doubling the depth quadrupled the time. End to end, 1,000,000 jobs through
+the dispatcher went from 541s to 30s, and throughput stopped falling as the
+queue got deeper. `php-worker-pool`'s `RequestQueue` is an `SplQueue` for
+exactly this reason, which is the part that stings.
+
+**Worth recording as a mistake, not just a fix.** Decision 3 moved the
+DELAYED set off an O(n log n) sort onto a min-heap, with a paragraph about
+why the data structure mattered - and left the ready set, which is hit far
+more often, on an array. Fixing the interesting structure and leaving the
+obvious one is easy to do twice.
+
+It also corrupted the previous measurement's conclusion. The storage share
+appeared to FALL with depth (28% at 10k, 15% at 100k), which read like a
+real property of the log and was an artefact of everything around it
+getting slower. With the pop linear, the share is stable and slightly
+rising, which is what a per-record cost against faster surroundings should
+look like.
+
+**Found by:** the profiling run at 1,000,000 jobs that the review suggested
+- not by reading the code. It had been there since Phase 2.
+
 ---
 
 ## 4. Attempts count deliveries, not runs
@@ -258,11 +304,14 @@ appended the record by hand, which is how it went unnoticed: the branch
 worked, nothing ever took it.
 
 **Cost:** measured rather than estimated - `bin/bench.php` grew a storage
-argument for it. At 10,000 no-op jobs on 8 workers: 23,500/s with no
-storage, 21,000/s in memory, 18,100/s to a file, and exactly 3.0 records
-per job (READY, PROCESSING, outcome) for 8 MB of log. So durable attempt
-counting costs about a quarter of the throughput at this scale, and it is
-the 8 MB that argues for the snapshots this project does not have.
+argument for it, and the numbers live in
+[BENCHMARKS.md](BENCHMARKS.md#what-durability-costs). At 10,000 no-op jobs
+on 8 workers: 27,100/s with no storage, 23,600/s in memory, 19,100/s to a
+file, at exactly 3.0 records per job. The per-record cost is a constant
+5 µs whatever the depth, and about three quarters of it is the filesystem
+append rather than the serialisation - an `encode` probe in the bench
+splits the two. What argues for the snapshots this project does not have is
+the log size at a million jobs: 804 MB, replayed in full at startup.
 
 **Related:** the rule that keeps the write volume at three records and not
 four is in `JobDispatcher::persist()` - the queue persists any job it takes

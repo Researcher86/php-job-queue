@@ -10,6 +10,7 @@ use App\Persistence\JobStorage;
 use App\Scheduler\DelayedJobScheduler;
 use App\Support\Clock;
 use App\Support\SystemClock;
+use SplQueue;
 
 /**
  * The FIFO queue from PLAN.md Phase 2, grown two things since:
@@ -18,20 +19,36 @@ use App\Support\SystemClock;
  *   - an optional JobStorage, so the queue can be rebuilt after the queue
  *     process dies (Phase 12).
  *
- * Ready jobs are a plain array used as a FIFO. There is no ordering
- * decision to make here - that is what PriorityQueue is for.
+ * Ready jobs are an SplQueue, not an array. That is not a style choice:
+ * `array_shift()` reindexes the whole array, so it is O(n) per pop and
+ * draining a queue of n jobs is O(n^2). Measured before the change -
+ * popping everything out of a full queue, no workers involved:
+ *
+ *    25,000 pops   0.328s
+ *    50,000 pops   1.191s
+ *   100,000 pops   4.815s
+ *   200,000 pops  19.602s
+ *
+ * Doubling the depth quadrupled the time. SplQueue is a doubly linked
+ * list, so dequeue() is O(1) and the drain is linear. php-worker-pool's
+ * RequestQueue is an SplQueue for the same reason.
+ *
+ * There is no ordering decision to make here - that is what PriorityQueue
+ * is for.
  */
 final class InMemoryQueue implements Queue
 {
-    /** @var list<Job> */
-    private array $ready = [];
-
+    /**
+     * @param SplQueue<Job> $ready the FIFO of available jobs - O(1) per
+     *                             pop, see the class docblock
+     */
     public function __construct(
         private readonly Clock $clock = new SystemClock(),
         private readonly ?JobStorage $storage = null,
         // A new one per queue, because the default is evaluated per call.
         // Injectable so a test can look at the schedule directly.
         private readonly DelayedJobScheduler $scheduler = new DelayedJobScheduler(),
+        private readonly SplQueue $ready = new SplQueue(),
     ) {
     }
 
@@ -56,7 +73,7 @@ final class InMemoryQueue implements Queue
         // Waiting or not is the scheduler's decision, and the same one for
         // both queues - see DelayedJobScheduler::holdIfNotDue().
         if (!$this->scheduler->holdIfNotDue($job, $delay, $this->clock->now())) {
-            $this->ready[] = $job;
+            $this->ready->enqueue($job);
         }
     }
 
@@ -65,10 +82,10 @@ final class InMemoryQueue implements Queue
         $now ??= $this->clock->now();
 
         foreach ($this->scheduler->releaseDue($now) as $job) {
-            $this->ready[] = $job;
+            $this->ready->enqueue($job);
         }
 
-        return array_shift($this->ready);
+        return $this->ready->isEmpty() ? null : $this->ready->dequeue();
     }
 
     public function size(): int
@@ -78,7 +95,7 @@ final class InMemoryQueue implements Queue
 
     public function readySize(): int
     {
-        return count($this->ready);
+        return $this->ready->count();
     }
 
     public function delayedSize(): int

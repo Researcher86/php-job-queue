@@ -1,6 +1,6 @@
 # PHP Job Queue — the plan it was built from
 
-> **Status: all 16 phases are done.** 234 tests, PHPStan level 8 clean.
+> **Status: all 16 phases are done.** 236 tests, PHPStan level 8 clean.
 >
 > This file is kept as the record of what was built, in what order, and what
 > each step was for - not as work outstanding. Every `[x]` names a test that
@@ -451,7 +451,7 @@ Each phase should introduce only the abstractions that are necessary.
 > all of them the rule in that last line being followed:
 >
 > * `Queue/` has no `ReadyQueue`, `DelayedQueue` or `ProcessingQueue`. The
->   ready set is an array inside each queue, delayed jobs are
+>   ready set is an `SplQueue` inside each queue, delayed jobs are
 >   `Scheduler/DelayedJobScheduler`, and the in-flight set belongs to
 >   `Timeout/VisibilityMonitor` - which needs the deadlines anyway, so a
 >   separate holder of the same jobs would have been a second source of
@@ -633,6 +633,12 @@ Do not implement retries or persistence yet.
 * [x] Empty queue returns null
 * [x] Queue size is correct
 * [x] Multiple jobs work correctly
+* [x] Popping does not get slower as the queue gets deeper
+
+> The last one was added late and should not have been needed: `pop()` used
+> `array_shift()`, which reindexes the array, so it was O(n) per pop and
+> O(n^2) to drain. It took a profiling run at a million jobs to notice.
+> See [docs/BENCHMARKS.md](docs/BENCHMARKS.md#the-quadratic-pop).
 
 ---
 
@@ -1867,22 +1873,33 @@ an assertion. Measured on the 8.5-cli image, no-op handlers, 8 workers:
 
 | jobs | drained in | throughput | peak memory | queue wait (avg) | execution (avg) |
 |--------:|-----------:|-----------:|------------:|-----------------:|----------------:|
-| 1,000 | 0.055s | 18,000/s | 4 MB | 23 ms | 0.08 ms |
-| 10,000 | 0.416s | 24,000/s | 12 MB | 215 ms | 0.14 ms |
-| 100,000 | 8.368s | 12,000/s | 96 MB | 5,129 ms | 0.30 ms |
+| 1,000 | 0.077s | 13,000/s | 4 MB | 27 ms | 0.16 ms |
+| 10,000 | 0.369s | 27,100/s | 14 MB | 186 ms | 0.13 ms |
+| 100,000 | 3.631s | 27,500/s | 98 MB | 1,877 ms | 0.14 ms |
+| 1,000,000 | 30.088s | 33,200/s | 906 MB | 18,765 ms | - |
 
 And what durability costs, at 10,000 jobs on 8 workers:
 
 | storage | throughput | log |
 |---|---:|---|
-| none | 23,500/s | - |
-| memory | 21,000/s | - |
-| file | 18,100/s | 30,000 records, 3.0 per job, 8 MB |
+| none | 27,100/s | - |
+| memory | 23,600/s | - |
+| file | 19,100/s | 30,000 records, 3.0 per job, 8 MB |
 
 Three records per job - READY, PROCESSING, and the outcome - with the
-middle one being what makes the attempt survive a crash. The 8 MB is the
-argument for the snapshots this project does not have: the log grows with
-every state change and `load()` replays all of it.
+middle one being what makes the attempt survive a crash, at a constant
+5us per record of which three quarters is the append rather than the
+serialisation.
+
+The argument for the snapshots this project does not have is the 1,000,000
+row: 804 MB of log, replayed in full by `load()` at startup.
+
+The first version of this table was wrong, and finding out why is the more
+useful part - see [docs/BENCHMARKS.md](docs/BENCHMARKS.md#the-quadratic-pop).
+Throughput used to fall with depth (24,000/s at 10k, 12,000/s at 100k,
+1,800/s at 1M) because `pop()` used `array_shift()`, which reindexes the
+array: O(n) per pop and O(n^2) to drain. An `SplQueue` made it flat, and
+1,000,000 jobs went from 541s to 30s.
 
 Which is Phase 14's insight as a table: at 100,000 jobs the average job took
 five seconds and the average handler took a third of a millisecond. The jobs

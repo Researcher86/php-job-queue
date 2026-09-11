@@ -9,6 +9,7 @@ use App\Job\JobPriority;
 use App\Scheduler\DelayedJobScheduler;
 use App\Support\Clock;
 use App\Support\SystemClock;
+use SplQueue;
 
 /**
  * One FIFO lane per priority - PLAN.md Phase 13.
@@ -30,19 +31,14 @@ use App\Support\SystemClock;
 final class PriorityQueue implements Queue
 {
     /**
-     * One FIFO per priority. Written out rather than built from
-     * JobPriority::cases(), so that pop() can index a lane without
-     * checking whether it exists - every case has one, and adding a case
-     * to the enum without a lane here is a fatal error rather than a
-     * silently dropped job.
+     * One FIFO per priority, keyed by JobPriority::name.
      *
-     * @var array<string, list<Job>> priority name => FIFO lane
+     * SplQueue rather than an array for the reason InMemoryQueue explains:
+     * array_shift() is O(n), which makes draining a lane O(n^2).
+     *
+     * @var array<string, SplQueue<Job>>
      */
-    private array $ready = [
-        JobPriority::HIGH->name => [],
-        JobPriority::NORMAL->name => [],
-        JobPriority::LOW->name => [],
-    ];
+    private array $ready = [];
 
     public function __construct(
         private readonly Clock $clock = new SystemClock(),
@@ -50,12 +46,20 @@ final class PriorityQueue implements Queue
         // A new one per queue - see InMemoryQueue.
         private readonly DelayedJobScheduler $scheduler = new DelayedJobScheduler(),
     ) {
+        // The one thing here that cannot be a property default: an SplQueue
+        // per lane needs `new` once per case, and a property initializer
+        // takes constant expressions only. Built from cases() so that a
+        // priority added to the enum gets a lane without anyone
+        // remembering to add one.
+        foreach (JobPriority::cases() as $priority) {
+            $this->ready[$priority->name] = new SplQueue();
+        }
     }
 
     public function push(Job $job, int $delay = 0): void
     {
         if (!$this->scheduler->holdIfNotDue($job, $delay, $this->clock->now())) {
-            $this->ready[$job->getPriority()->name][] = $job;
+            $this->ready[$job->getPriority()->name]->enqueue($job);
         }
     }
 
@@ -64,12 +68,12 @@ final class PriorityQueue implements Queue
         $now ??= $this->clock->now();
 
         foreach ($this->scheduler->releaseDue($now) as $job) {
-            $this->ready[$job->getPriority()->name][] = $job;
+            $this->ready[$job->getPriority()->name]->enqueue($job);
         }
 
-        $lane = $this->selector->next(array_map('count', $this->ready));
+        $lane = $this->selector->next($this->depth());
 
-        return $lane === null ? null : array_shift($this->ready[$lane->name]);
+        return $lane === null ? null : $this->ready[$lane->name]->dequeue();
     }
 
     public function size(): int
@@ -79,7 +83,18 @@ final class PriorityQueue implements Queue
 
     public function readySize(): int
     {
-        return array_sum(array_map('count', $this->ready));
+        return array_sum($this->depth());
+    }
+
+    /**
+     * How many jobs are waiting per lane, keyed the way LaneSelector wants
+     * them.
+     *
+     * @return array<string, int>
+     */
+    private function depth(): array
+    {
+        return array_map(static fn (SplQueue $lane): int => $lane->count(), $this->ready);
     }
 
     public function delayedSize(): int

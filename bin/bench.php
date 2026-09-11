@@ -7,6 +7,7 @@ use App\Job\Job;
 use App\Metrics\MetricsCollector;
 use App\Persistence\FileStorage;
 use App\Persistence\InMemoryStorage;
+use App\Persistence\JobStorage;
 use App\Producer\JobFactory;
 use App\Producer\Producer;
 use App\Queue\InMemoryQueue;
@@ -26,9 +27,21 @@ require __DIR__ . '/../vendor/autoload.php';
  *
  * Arguments: <jobs> <workers> <work-microseconds> <storage>. The third is
  * how long each handler pretends to work; leave it at 0 to measure the
- * queue itself rather than the handler. The fourth is `none` (default),
- * `memory`, or `file` - what durability costs, measured rather than
- * asserted. `file` also reports how many records the run appended.
+ * queue itself rather than the handler.
+ *
+ * The fourth is the storage, and there are four of them - three real and
+ * one probe:
+ *
+ *   none     no persistence at all
+ *   memory   InMemoryStorage: an array assignment per record
+ *   encode   serialises each record and throws it away. Not a usable
+ *            backend; it exists to separate the cost of turning a job
+ *            into JSON from the cost of writing the JSON down
+ *   file     FileStorage: json_encode plus an append
+ *
+ * Whatever the storage, the run reports how much of the wall clock was
+ * spent inside it, which is the number that says whether durability is
+ * costing CPU or costing I/O.
  *
  * What to read in the output:
  *
@@ -45,6 +58,58 @@ require __DIR__ . '/../vendor/autoload.php';
  *    you find out what that is worth.
  */
 
+/**
+ * Wraps a JobStorage and adds up the time spent in it.
+ *
+ * Part of the benchmark harness, not of the system: the point is to be
+ * able to say whether a slower run is slower because of the storage or in
+ * spite of it, without guessing from the throughput alone.
+ */
+final class TimedStorage implements JobStorage
+{
+    public float $seconds = 0.0;
+
+    public int $writes = 0;
+
+    public function __construct(
+        private readonly JobStorage $inner,
+    ) {
+    }
+
+    public function store(string $key, array $data): void
+    {
+        $startedAt = microtime(true);
+        $this->inner->store($key, $data);
+        $this->seconds += microtime(true) - $startedAt;
+        $this->writes++;
+    }
+
+    public function load(): array
+    {
+        return $this->inner->load();
+    }
+}
+
+/**
+ * Serialises each record exactly as FileStorage would, then drops it.
+ *
+ * A measurement probe, not a backend: the difference between this and
+ * `file` is what the filesystem costs, and the difference between this and
+ * `memory` is what json_encode costs.
+ */
+final class EncodeOnlyStorage implements JobStorage
+{
+    public function store(string $key, array $data): void
+    {
+        json_encode(['key' => $key, 'data' => $data], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+    }
+
+    public function load(): array
+    {
+        return [];
+    }
+}
+
 $jobCount = (int) ($argv[1] ?? 1_000);
 $workerCount = (int) ($argv[2] ?? 4);
 $workMicroseconds = (int) ($argv[3] ?? 0);
@@ -53,12 +118,17 @@ $storageKind = (string) ($argv[4] ?? 'none');
 $logPath = sys_get_temp_dir() . '/php-job-queue-bench.log';
 @unlink($logPath);
 
-$storage = match ($storageKind) {
+$backend = match ($storageKind) {
     'none' => null,
     'memory' => new InMemoryStorage(),
+    'encode' => new EncodeOnlyStorage(),
     'file' => new FileStorage($logPath),
-    default => throw new InvalidArgumentException("Unknown storage: {$storageKind} (none|memory|file)"),
+    default => throw new InvalidArgumentException(
+        "Unknown storage: {$storageKind} (none|memory|encode|file)",
+    ),
 };
+
+$storage = $backend === null ? null : new TimedStorage($backend);
 
 $clock = new SystemClock();
 $metrics = new MetricsCollector();
@@ -94,6 +164,16 @@ $elapsed = microtime(true) - $startedAt;
 printf("\nqueued   %d jobs in %.3fs (%s/s)\n", $jobCount, $queuedIn, number_format($jobCount / $queuedIn));
 printf("drained  %d jobs in %.3fs (%s/s)\n", $dispatched, $elapsed, number_format($dispatched / $elapsed));
 printf("memory   %.1f MB peak\n", memory_get_peak_usage(true) / 1_048_576);
+
+if ($storage !== null) {
+    printf(
+        "storage  %.3fs in %s writes (%.1f%% of the drain, %.1fus each)\n",
+        $storage->seconds,
+        number_format($storage->writes),
+        $storage->seconds / $elapsed * 100,
+        $storage->writes === 0 ? 0.0 : $storage->seconds / $storage->writes * 1_000_000,
+    );
+}
 
 if ($storageKind === 'file' && file_exists($logPath)) {
     $records = count(file($logPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: []);

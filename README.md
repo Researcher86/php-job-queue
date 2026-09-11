@@ -22,7 +22,7 @@ Read  →  Run  →  Experiment  →  Break something  →  Observe  →  Unders
 
 ## Status
 
-All 16 phases of [PLAN.md](PLAN.md) are done, 234 tests, PHPStan level 8
+All 16 phases of [PLAN.md](PLAN.md) are done, 236 tests, PHPStan level 8
 clean.
 
 `Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
@@ -657,17 +657,23 @@ that test existed.
 Measured, 10,000 no-op jobs on 8 workers
 (`make docker-bench ARGS="10000 8 0 file"`):
 
-| storage | throughput | log |
-|---|---:|---|
-| `none` | 23,500/s | — |
-| `memory` | 21,000/s | — |
-| `file` | 18,100/s | 30,000 records, 3.0 per job, 8 MB |
+| storage | throughput | time in storage | per write | log |
+|---|---:|---:|---:|---|
+| `none` | 27,100/s | — | — | — |
+| `memory` | 23,600/s | 4.4% | 0.6 µs | — |
+| `file` | 19,100/s | 28.5% | 5.0 µs | 30,000 records, 8 MB |
 
-So durability costs about a quarter of the throughput here, and 8 MB of log
-per 10,000 trivial jobs. The second number is the one that matters: the log
-grows with every state change and `load()` replays all of it, unbounded. A
-real system pairs this with periodic snapshots and compaction; this one does
-not, and the number above is why that would be the next thing to build.
+So durability costs a bit over a quarter of the throughput here, at a
+constant 5 µs per record — of which about three quarters is the filesystem
+append rather than the serialisation, which is worth knowing before
+optimising the wrong half.
+
+And the number that matters more than either: **804 MB of log for 1,000,000
+jobs**, all of which `load()` replays at startup. The log grows with every
+state change, unbounded. A real system pairs this with periodic snapshots
+and compaction; this one does not, and that figure is why it would be the
+next thing to build. Full tables in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
@@ -977,23 +983,33 @@ whole runtime instead and see what the log alone can restore.
 
 ## Performance
 
-`make docker-bench ARGS="<jobs> <workers> <work-microseconds>"`, no-op
-handlers, 8 workers, on the `php:8.5-cli` image:
+`make docker-bench ARGS="<jobs> <workers> <work-microseconds> <storage>"`,
+no-op handlers, 8 workers, on the `php:8.5-cli` image:
 
 | jobs | drained in | throughput | peak memory | queue wait (avg) | execution (avg) |
 |--------:|-----------:|-----------:|------------:|-----------------:|----------------:|
-| 1,000 | 0.055s | 18,000/s | 4 MB | 23 ms | 0.08 ms |
-| 10,000 | 0.416s | 24,000/s | 12 MB | 215 ms | 0.14 ms |
-| 100,000 | 8.368s | 12,000/s | 96 MB | 5,129 ms | 0.30 ms |
+| 1,000 | 0.077s | 13,000/s | 4 MB | 27 ms | 0.16 ms |
+| 10,000 | 0.369s | 27,100/s | 14 MB | 186 ms | 0.13 ms |
+| 100,000 | 3.631s | 27,500/s | 98 MB | 1,877 ms | 0.14 ms |
+| 1,000,000 | 30.088s | 33,200/s | 906 MB | 18,765 ms | — |
 
 Which is the metrics section as a measurement rather than a claim: at
-100,000 jobs the average job took five seconds and the average handler took
-a third of a millisecond. The jobs were not slow. They were queued.
+100,000 jobs the average job took nearly two seconds and the average handler
+took 0.14 ms. The jobs were not slow. They were queued.
 
-Doubling the workers on no-op jobs does not double throughput — the
-dispatcher is one process writing to one socket at a time, and past a point
-it, not the workers, is the limit. Which is the honest shape of this design,
-not a bug in it.
+The smallest run is the slowest, because forking eight workers costs the
+same whether they then handle a thousand jobs or a million. Past that,
+throughput is flat with depth — which it was not until a profiling run at
+1,000,000 jobs found `pop()` doing an `array_shift()` and turning the drain
+into O(n²). That story, what durability costs (about a quarter of the
+throughput, 5 µs per record, three quarters of it the filesystem), and the
+804 MB of log that argues for snapshots are all in
+**[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+
+Where the ceiling is: the dispatcher, not the workers. It is one process
+writing to one socket at a time, so doubling the workers on no-op jobs does
+not double throughput. The honest shape of a single-master design rather
+than a bug in it.
 
 ---
 
@@ -1030,6 +1046,7 @@ php-job-queue/
 │   └── …                           one directory per src/ namespace
 └── docs/
     ├── ARCHITECTURE.md             the mechanisms in more depth
+    ├── BENCHMARKS.md               the numbers, and what they mean
     └── DECISIONS.md                what was chosen, rejected, and fixed
 ```
 

@@ -511,7 +511,7 @@ whole design in one place.
 |---|---|---|---|
 | CREATED | nowhere yet | the producer | `push()` |
 | DELAYED | the delayed heap | `DelayedJobScheduler` | its deadline |
-| READY, available | the ready set / a lane | the queue | `pop()` |
+| READY, available | the ready `SplQueue`, or its lane | the queue | `pop()` |
 | READY, future `availableAt` | the delayed heap | `DelayedJobScheduler` | its deadline |
 | PROCESSING | a worker, under a delivery lease | `VisibilityMonitor` | an ACK or NACK **from the current delivery**, or the deadline |
 | COMPLETED | nowhere | nobody — it is done | nothing |
@@ -572,4 +572,6 @@ that can change a state.
 | 1,000 and 10,000 jobs | [`tests/Stress/StressTest.php`](../tests/Stress/StressTest.php) |
 
 Design decisions, the alternatives that were rejected, and the bugs that
-changed the code: [DECISIONS.md](DECISIONS.md).
+changed the code: [DECISIONS.md](DECISIONS.md). The numbers, and the
+profiling run that found an O(n²) in the hot path:
+[BENCHMARKS.md](BENCHMARKS.md).

@@ -6,8 +6,10 @@ namespace App\Tests\Stress;
 
 use App\Dispatcher\JobDispatcher;
 use App\Job\Job;
+use App\Job\JobPriority;
 use App\Metrics\MetricsCollector;
 use App\Queue\InMemoryQueue;
+use App\Queue\PriorityQueue;
 use App\Tests\Support\FakeClock;
 use App\Tests\Support\Handlers;
 use App\Worker\WorkerPool;
@@ -96,6 +98,79 @@ final class StressTest extends TestCase
         }
 
         $this->assertSame(0, $queue->size());
+    }
+
+    /**
+     * pop() must not get slower as the queue gets deeper.
+     *
+     * It used to. The ready set was a plain array and pop() used
+     * array_shift(), which reindexes it - O(n) per pop, so draining n jobs
+     * was O(n^2). Measured then, popping a full queue with no workers
+     * involved: 25k took 0.328s, 50k took 1.191s, 100k took 4.815s, 200k
+     * took 19.602s. Doubling the depth quadrupled the time.
+     *
+     * With SplQueue the same 200k takes 0.116s and the rate is flat. This
+     * asserts a budget rather than a ratio because a ratio over sub-second
+     * timings is mostly noise: 50,000 pops take about 0.03s linear and
+     * about 1.2s quadratic, so half a second sits an order of magnitude
+     * above one and comfortably below the other.
+     *
+     * The end-to-end effect was large - 1,000,000 jobs through the
+     * dispatcher went from 541s to 30s.
+     */
+    public function testPoppingDoesNotGetSlowerAsTheQueueGetsDeeper(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $depth = 50_000;
+
+        for ($i = 0; $i < $depth; $i++) {
+            $queue->push(Job::create(type: 'x', clock: $clock));
+        }
+
+        $startedAt = microtime(true);
+        $popped = 0;
+
+        while ($queue->pop() !== null) {
+            $popped++;
+        }
+
+        $elapsed = microtime(true) - $startedAt;
+
+        $this->assertSame($depth, $popped);
+        $this->assertLessThan(0.5, $elapsed, sprintf(
+            '%d pops took %.3fs - pop() looks super-linear again',
+            $depth,
+            $elapsed,
+        ));
+    }
+
+    /** The same property for the priority lanes, which had the same array_shift. */
+    public function testPoppingALaneDoesNotGetSlowerAsItGetsDeeper(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new PriorityQueue($clock);
+        $depth = 50_000;
+
+        for ($i = 0; $i < $depth; $i++) {
+            $queue->push(Job::create(type: 'x', clock: $clock, priority: JobPriority::NORMAL));
+        }
+
+        $startedAt = microtime(true);
+        $popped = 0;
+
+        while ($queue->pop() !== null) {
+            $popped++;
+        }
+
+        $elapsed = microtime(true) - $startedAt;
+
+        $this->assertSame($depth, $popped);
+        $this->assertLessThan(1.0, $elapsed, sprintf(
+            '%d pops took %.3fs - the lanes look super-linear again',
+            $depth,
+            $elapsed,
+        ));
     }
 
     public function testThousandJobsWithMetricsStayConsistent(): void
