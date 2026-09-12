@@ -22,8 +22,7 @@ Read  →  Run  →  Experiment  →  Break something  →  Observe  →  Unders
 
 ## Status
 
-All 16 phases of [PLAN.md](PLAN.md) are done, 236 tests, PHPStan level 8
-clean.
+All 16 planned phases are complete: 236 tests, PHPStan level 8 clean.
 
 `Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
 `Forked worker pool` · `Dispatcher` · `ACK / NACK` · `Delivery leases and

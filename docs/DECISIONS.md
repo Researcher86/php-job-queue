@@ -4,8 +4,8 @@ What was chosen, what was rejected, and the bugs that changed the design.
 Indexed by decision, so a question like "why is a retry not its own queue?"
 has one place to look.
 
-The phases these belong to are in [PLAN.md](../PLAN.md); the mechanisms
-themselves are in [ARCHITECTURE.md](ARCHITECTURE.md).
+The mechanisms themselves are documented in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
