@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Worker;
+namespace PhpJobQueue\Worker;
 
 /**
  * A worker's position in its own lifecycle. The transitions live in

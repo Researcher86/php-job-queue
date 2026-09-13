@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Worker;
+namespace PhpJobQueue\Worker;
 
 use RuntimeException;
 

@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Queue;
+namespace PhpJobQueue\Queue;
 
-use App\Job\JobPriority;
+use PhpJobQueue\Job\JobPriority;
 
 /**
  * Always the highest non-empty lane. The obvious policy, and the one that

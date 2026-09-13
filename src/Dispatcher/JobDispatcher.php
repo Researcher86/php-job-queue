@@ -2,23 +2,23 @@
 
 declare(strict_types=1);
 
-namespace App\Dispatcher;
+namespace PhpJobQueue\Dispatcher;
 
-use App\Delivery\Delivery;
-use App\DLQ\DeadLetterQueue;
-use App\Job\Job;
-use App\Metrics\MetricsCollector;
-use App\Metrics\QueueMetrics;
-use App\Persistence\JobStorage;
-use App\Queue\Queue;
-use App\Retry\RetryPolicy;
-use App\Support\Clock;
-use App\Support\SystemClock;
-use App\Timeout\VisibilityMonitor;
-use App\Worker\Worker;
-use App\Worker\WorkerDiedException;
-use App\Worker\WorkerOutcome;
-use App\Worker\WorkerPool;
+use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\DLQ\DeadLetterQueue;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Metrics\QueueMetrics;
+use PhpJobQueue\Persistence\JobStorage;
+use PhpJobQueue\Queue\Queue;
+use PhpJobQueue\Retry\RetryPolicy;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
+use PhpJobQueue\Timeout\VisibilityMonitor;
+use PhpJobQueue\Worker\Worker;
+use PhpJobQueue\Worker\WorkerDiedException;
+use PhpJobQueue\Worker\WorkerOutcome;
+use PhpJobQueue\Worker\WorkerPool;
 use Throwable;
 
 /**

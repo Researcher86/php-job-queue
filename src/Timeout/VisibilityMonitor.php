@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Timeout;
+namespace PhpJobQueue\Timeout;
 
-use App\Delivery\Delivery;
-use App\Job\Job;
-use App\Support\Clock;
-use App\Support\SystemClock;
+use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
 
 /**
  * Holds the lease on every job that is in a worker's hands, and takes back

@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\DLQ;
+namespace PhpJobQueue\Tests\DLQ;
 
-use App\DLQ\DeadLetterQueue;
-use App\Job\Job;
-use App\Job\JobState;
-use App\Tests\Support\FakeClock;
+use PhpJobQueue\DLQ\DeadLetterQueue;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Job;
+namespace PhpJobQueue\Tests\Job;
 
-use App\Job\Job;
-use App\Job\JobPriority;
-use App\Job\JobState;
-use App\Tests\Support\FakeClock;
 use LogicException;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 use ValueError;
 

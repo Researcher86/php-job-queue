@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Worker;
+namespace PhpJobQueue\Worker;
 
-use App\Job\Job;
-use App\Metrics\MetricsCollector;
 use Closure;
 use InvalidArgumentException;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Metrics\MetricsCollector;
 
 /**
  * The fixed set of worker processes, and everything the Master side needs

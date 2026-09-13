@@ -2,17 +2,17 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Persistence;
+namespace PhpJobQueue\Tests\Persistence;
 
-use App\Dispatcher\JobDispatcher;
-use App\Job\Job;
-use App\Persistence\FileStorage;
-use App\Queue\InMemoryQueue;
-use App\Retry\FixedDelayRetry;
-use App\Tests\Support\FakeClock;
-use App\Tests\Support\Handlers;
-use App\Worker\WorkerPool;
 use Closure;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Retry\FixedDelayRetry;
+use PhpJobQueue\Tests\Support\FakeClock;
+use PhpJobQueue\Tests\Support\Handlers;
+use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

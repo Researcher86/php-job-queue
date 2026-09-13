@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Delivery;
+namespace PhpJobQueue\Delivery;
 
-use App\Job\Job;
+use PhpJobQueue\Job\Job;
 
 /**
  * One handing-out of one job to one worker - the lease, and the thing an

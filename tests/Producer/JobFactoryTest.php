@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Producer;
+namespace PhpJobQueue\Tests\Producer;
 
-use App\Job\JobPriority;
-use App\Metrics\MetricsCollector;
-use App\Producer\JobFactory;
-use App\Tests\Support\FakeClock;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class JobFactoryTest extends TestCase

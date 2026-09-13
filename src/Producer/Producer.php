@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Producer;
+namespace PhpJobQueue\Producer;
 
-use App\Job\Job;
-use App\Job\JobPriority;
-use App\Queue\Queue;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Queue\Queue;
 
 /**
  * The application's way in - PLAN.md Phase 3.

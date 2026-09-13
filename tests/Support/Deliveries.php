@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Support;
+namespace PhpJobQueue\Tests\Support;
 
-use App\Delivery\Delivery;
-use App\Job\Job;
-use App\Worker\Worker;
+use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Worker\Worker;
 
 /**
  * Leases for tests that drive a Worker directly.

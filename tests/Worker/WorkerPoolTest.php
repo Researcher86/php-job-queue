@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Worker;
+namespace PhpJobQueue\Tests\Worker;
 
-use App\Job\Job;
-use App\Tests\Support\Deliveries;
-use App\Tests\Support\Handlers;
-use App\Worker\WorkerPool;
 use InvalidArgumentException;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Tests\Support\Deliveries;
+use PhpJobQueue\Tests\Support\Handlers;
+use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 
 final class WorkerPoolTest extends TestCase

@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Retry;
+namespace PhpJobQueue\Tests\Retry;
 
-use App\Job\Job;
-use App\Retry\ExponentialBackoffRetry;
-use App\Retry\FixedDelayRetry;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Retry\ExponentialBackoffRetry;
+use PhpJobQueue\Retry\FixedDelayRetry;
 use PHPUnit\Framework\TestCase;
 
 final class RetryPolicyTest extends TestCase

@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Idempotency;
+namespace PhpJobQueue\Idempotency;
 
-use App\Job\Job;
-use App\Job\JobResult;
 use Closure;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobResult;
 use RuntimeException;
 
 /**

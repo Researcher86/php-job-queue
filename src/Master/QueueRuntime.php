@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Master;
+namespace PhpJobQueue\Master;
 
-use App\Dispatcher\JobDispatcher;
-use App\Support\Clock;
-use App\Support\SystemClock;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
 
 /**
  * The long-running process: the loop that keeps the queue moving, and the

@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Support;
+namespace PhpJobQueue\Tests\Support;
 
-use App\Support\Clock;
+use PhpJobQueue\Support\Clock;
 
 final class FakeClock implements Clock
 {

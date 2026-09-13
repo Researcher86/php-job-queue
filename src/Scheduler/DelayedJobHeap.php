@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Scheduler;
+namespace PhpJobQueue\Scheduler;
 
-use App\Job\Job;
+use PhpJobQueue\Job\Job;
 use SplHeap;
 
 /**

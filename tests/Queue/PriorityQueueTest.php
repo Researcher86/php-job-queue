@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Queue;
+namespace PhpJobQueue\Tests\Queue;
 
-use App\Job\Job;
-use App\Job\JobPriority;
-use App\Job\JobState;
-use App\Queue\PriorityQueue;
-use App\Queue\WeightedRoundRobin;
-use App\Tests\Support\FakeClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Queue\PriorityQueue;
+use PhpJobQueue\Queue\WeightedRoundRobin;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class PriorityQueueTest extends TestCase

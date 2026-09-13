@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Queue;
+namespace PhpJobQueue\Tests\Queue;
 
-use App\Job\JobPriority;
-use App\Queue\StrictPriority;
-use App\Queue\WeightedRoundRobin;
 use InvalidArgumentException;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Queue\StrictPriority;
+use PhpJobQueue\Queue\WeightedRoundRobin;
 use PHPUnit\Framework\TestCase;
 
 final class LaneSelectorTest extends TestCase

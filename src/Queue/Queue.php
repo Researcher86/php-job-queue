@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Queue;
+namespace PhpJobQueue\Queue;
 
-use App\Job\Job;
+use PhpJobQueue\Job\Job;
 
 /**
  * Where jobs wait - PLAN.md Phase 2.

@@ -2,18 +2,18 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Master;
+namespace PhpJobQueue\Tests\Master;
 
-use App\Dispatcher\JobDispatcher;
-use App\Job\Job;
-use App\Job\JobState;
-use App\Master\QueueRuntime;
-use App\Persistence\FileStorage;
-use App\Queue\InMemoryQueue;
-use App\Tests\Support\FakeClock;
-use App\Tests\Support\Handlers;
-use App\Worker\WorkerPool;
 use Closure;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Master\QueueRuntime;
+use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Tests\Support\FakeClock;
+use PhpJobQueue\Tests\Support\Handlers;
+use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 
 final class QueueRuntimeTest extends TestCase

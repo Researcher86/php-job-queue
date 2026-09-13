@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Worker;
+namespace PhpJobQueue\Worker;
 
-use App\Delivery\Delivery;
-use App\Job\Job;
-use App\Job\JobResult;
 use Closure;
 use LogicException;
+use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobResult;
 use RuntimeException;
 use Throwable;
 

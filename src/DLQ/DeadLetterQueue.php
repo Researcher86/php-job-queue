@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\DLQ;
+namespace PhpJobQueue\DLQ;
 
-use App\Job\Job;
-use App\Job\JobState;
-use App\Support\Clock;
-use App\Support\SystemClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
 use Throwable;
 
 /**

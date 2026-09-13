@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-namespace App\Queue;
+namespace PhpJobQueue\Queue;
 
-use App\Job\Job;
-use App\Job\JobState;
-use App\Persistence\JobStorage;
-use App\Scheduler\DelayedJobScheduler;
-use App\Support\Clock;
-use App\Support\SystemClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Persistence\JobStorage;
+use PhpJobQueue\Scheduler\DelayedJobScheduler;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
 use SplQueue;
 
 /**

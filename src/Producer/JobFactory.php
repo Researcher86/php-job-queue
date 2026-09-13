@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Producer;
+namespace PhpJobQueue\Producer;
 
-use App\Job\Job;
-use App\Job\JobPriority;
-use App\Metrics\MetricsCollector;
-use App\Support\Clock;
-use App\Support\SystemClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
 
 /**
  * The one place new jobs are born - PLAN.md Phase 3.

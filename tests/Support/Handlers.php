@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Support;
+namespace PhpJobQueue\Tests\Support;
 
-use App\Job\Job;
 use Closure;
+use PhpJobQueue\Job\Job;
 
 /**
  * The job handlers the tests reuse.

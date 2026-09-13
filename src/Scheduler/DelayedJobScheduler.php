@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Scheduler;
+namespace PhpJobQueue\Scheduler;
 
-use App\Job\Job;
-use App\Job\JobState;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
 use RuntimeException;
 
 /**

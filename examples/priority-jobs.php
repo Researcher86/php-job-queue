@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-use App\Job\Job;
-use App\Job\JobPriority;
-use App\Producer\JobFactory;
-use App\Producer\Producer;
-use App\Queue\PriorityQueue;
-use App\Queue\StrictPriority;
-use App\Queue\WeightedRoundRobin;
-use App\Support\SystemClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Producer\Producer;
+use PhpJobQueue\Queue\PriorityQueue;
+use PhpJobQueue\Queue\StrictPriority;
+use PhpJobQueue\Queue\WeightedRoundRobin;
+use PhpJobQueue\Support\SystemClock;
 
 require __DIR__ . '/../vendor/autoload.php';
 

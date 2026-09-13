@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Metrics;
+namespace PhpJobQueue\Tests\Metrics;
 
-use App\Metrics\MetricsCollector;
 use InvalidArgumentException;
+use PhpJobQueue\Metrics\MetricsCollector;
 use PHPUnit\Framework\TestCase;
 
 final class MetricsCollectorTest extends TestCase

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Persistence;
+namespace PhpJobQueue\Persistence;
 
 /**
  * Somewhere a job's last known state can survive the process - PLAN.md

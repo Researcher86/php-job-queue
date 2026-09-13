@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Queue;
+namespace PhpJobQueue\Queue;
 
-use App\Job\JobPriority;
 use InvalidArgumentException;
+use PhpJobQueue\Job\JobPriority;
 
 /**
  * Serves the lanes in rounds, each lane getting as many turns per round as

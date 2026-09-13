@@ -2,19 +2,19 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Job;
+namespace PhpJobQueue\Tests\Job;
 
-use App\Dispatcher\JobDispatcher;
-use App\Idempotency\ChargePaymentJob;
-use App\Idempotency\IdempotencyGuard;
-use App\Job\Job;
-use App\Job\JobState;
-use App\Persistence\FileStorage;
-use App\Producer\JobFactory;
-use App\Producer\Producer;
-use App\Queue\InMemoryQueue;
-use App\Tests\Support\FakeClock;
-use App\Worker\WorkerPool;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Idempotency\ChargePaymentJob;
+use PhpJobQueue\Idempotency\IdempotencyGuard;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Producer\Producer;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Tests\Support\FakeClock;
+use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

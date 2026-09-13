@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Queue;
+namespace PhpJobQueue\Queue;
 
-use App\Job\JobPriority;
+use PhpJobQueue\Job\JobPriority;
 
 /**
  * Decides which priority lane PriorityQueue serves next - PLAN.md Phase 13.

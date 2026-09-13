@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Job;
+namespace PhpJobQueue\Job;
 
-use App\Support\Clock;
-use App\Support\SystemClock;
 use LogicException;
+use PhpJobQueue\Support\Clock;
+use PhpJobQueue\Support\SystemClock;
 
 /**
  * One unit of asynchronous work, and its position in its own lifecycle.

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Metrics;
+namespace PhpJobQueue\Metrics;
 
 /**
  * A gauge reading: what the system looks like at one instant - PLAN.md

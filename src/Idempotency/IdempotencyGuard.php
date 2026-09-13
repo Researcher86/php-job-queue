@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Idempotency;
+namespace PhpJobQueue\Idempotency;
 
-use App\Persistence\JobStorage;
+use PhpJobQueue\Persistence\JobStorage;
 
 /**
  * A set of keys for side effects that have already happened, so that a

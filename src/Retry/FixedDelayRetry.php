@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Retry;
+namespace PhpJobQueue\Retry;
 
-use App\Job\Job;
+use PhpJobQueue\Job\Job;
 
 /**
  * The same delay every time: 1s, 1s, 1s.

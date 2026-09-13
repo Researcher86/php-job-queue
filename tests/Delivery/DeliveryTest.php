@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Delivery;
+namespace PhpJobQueue\Tests\Delivery;
 
-use App\Delivery\Delivery;
-use App\Job\Job;
+use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\Job\Job;
 use PHPUnit\Framework\TestCase;
 
 final class DeliveryTest extends TestCase

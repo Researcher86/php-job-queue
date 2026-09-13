@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Support;
+namespace PhpJobQueue\Support;
 
 /**
  * The current time, as an injectable thing.

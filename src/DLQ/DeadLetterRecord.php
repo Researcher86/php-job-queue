@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\DLQ;
+namespace PhpJobQueue\DLQ;
 
-use App\Job\Job;
+use PhpJobQueue\Job\Job;
 use Throwable;
 
 /**

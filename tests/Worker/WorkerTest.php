@@ -2,15 +2,15 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Worker;
+namespace PhpJobQueue\Tests\Worker;
 
-use App\Job\Job;
-use App\Tests\Support\Deliveries;
-use App\Tests\Support\Handlers;
-use App\Worker\Worker;
-use App\Worker\WorkerDiedException;
-use App\Worker\WorkerState;
 use LogicException;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Tests\Support\Deliveries;
+use PhpJobQueue\Tests\Support\Handlers;
+use PhpJobQueue\Worker\Worker;
+use PhpJobQueue\Worker\WorkerDiedException;
+use PhpJobQueue\Worker\WorkerState;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

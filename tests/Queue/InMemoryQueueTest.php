@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Queue;
+namespace PhpJobQueue\Tests\Queue;
 
-use App\Job\Job;
-use App\Job\JobState;
-use App\Persistence\InMemoryStorage;
-use App\Queue\InMemoryQueue;
-use App\Tests\Support\FakeClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Persistence\InMemoryStorage;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class InMemoryQueueTest extends TestCase

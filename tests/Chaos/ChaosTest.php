@@ -2,21 +2,21 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Chaos;
+namespace PhpJobQueue\Tests\Chaos;
 
-use App\Dispatcher\JobDispatcher;
-use App\DLQ\DeadLetterQueue;
-use App\Job\Job;
-use App\Job\JobState;
-use App\Metrics\MetricsCollector;
-use App\Persistence\InMemoryStorage;
-use App\Queue\InMemoryQueue;
-use App\Retry\FixedDelayRetry;
-use App\Tests\Support\Deliveries;
-use App\Tests\Support\FakeClock;
-use App\Tests\Support\Handlers;
-use App\Timeout\VisibilityMonitor;
-use App\Worker\WorkerPool;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\DLQ\DeadLetterQueue;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Persistence\InMemoryStorage;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Retry\FixedDelayRetry;
+use PhpJobQueue\Tests\Support\Deliveries;
+use PhpJobQueue\Tests\Support\FakeClock;
+use PhpJobQueue\Tests\Support\Handlers;
+use PhpJobQueue\Timeout\VisibilityMonitor;
+use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

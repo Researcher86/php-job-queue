@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Timeout;
+namespace PhpJobQueue\Tests\Timeout;
 
-use App\Job\Job;
-use App\Job\JobState;
-use App\Tests\Support\FakeClock;
-use App\Timeout\VisibilityMonitor;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Tests\Support\FakeClock;
+use PhpJobQueue\Timeout\VisibilityMonitor;
 use PHPUnit\Framework\TestCase;
 
 final class VisibilityMonitorTest extends TestCase

@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Scheduler;
+namespace PhpJobQueue\Tests\Scheduler;
 
-use App\Job\Job;
-use App\Job\JobState;
-use App\Scheduler\DelayedJobScheduler;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Scheduler\DelayedJobScheduler;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

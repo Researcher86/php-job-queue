@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Persistence;
+namespace PhpJobQueue\Tests\Persistence;
 
-use App\Job\Job;
-use App\Persistence\FileStorage;
-use App\Queue\InMemoryQueue;
-use App\Tests\Support\FakeClock;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

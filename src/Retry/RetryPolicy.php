@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Retry;
+namespace PhpJobQueue\Retry;
 
-use App\Job\Job;
+use PhpJobQueue\Job\Job;
 
 /**
  * How long to wait before trying a failed job again - PLAN.md Phase 7.

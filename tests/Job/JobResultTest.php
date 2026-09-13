@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Job;
+namespace PhpJobQueue\Tests\Job;
 
-use App\Job\JobResult;
+use PhpJobQueue\Job\JobResult;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 

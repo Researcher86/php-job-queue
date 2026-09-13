@@ -2,25 +2,25 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Dispatcher;
+namespace PhpJobQueue\Tests\Dispatcher;
 
-use App\Dispatcher\JobDispatcher;
-use App\DLQ\DeadLetterQueue;
-use App\Job\Job;
-use App\Job\JobPriority;
-use App\Job\JobState;
-use App\Metrics\MetricsCollector;
-use App\Persistence\FileStorage;
-use App\Persistence\InMemoryStorage;
-use App\Queue\InMemoryQueue;
-use App\Queue\PriorityQueue;
-use App\Retry\FixedDelayRetry;
-use App\Tests\Support\Deliveries;
-use App\Tests\Support\FakeClock;
-use App\Tests\Support\Handlers;
-use App\Timeout\VisibilityMonitor;
-use App\Worker\WorkerPool;
 use Closure;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\DLQ\DeadLetterQueue;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Persistence\InMemoryStorage;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Queue\PriorityQueue;
+use PhpJobQueue\Retry\FixedDelayRetry;
+use PhpJobQueue\Tests\Support\Deliveries;
+use PhpJobQueue\Tests\Support\FakeClock;
+use PhpJobQueue\Tests\Support\Handlers;
+use PhpJobQueue\Timeout\VisibilityMonitor;
+use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 
@@ -31,7 +31,7 @@ final class JobDispatcherTest extends TestCase
      *
      * @return array{InMemoryQueue, WorkerPool, JobDispatcher}
      */
-    private function dispatcherWith(Closure $handler, ?\App\Retry\RetryPolicy $retryPolicy = null): array
+    private function dispatcherWith(Closure $handler, ?\PhpJobQueue\Retry\RetryPolicy $retryPolicy = null): array
     {
         $queue = new InMemoryQueue(new FakeClock());
         $pool = new WorkerPool(1, $handler);

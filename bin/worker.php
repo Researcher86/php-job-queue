@@ -2,16 +2,16 @@
 
 declare(strict_types=1);
 
-use App\Dispatcher\JobDispatcher;
-use App\Job\Job;
-use App\Master\QueueRuntime;
-use App\Metrics\MetricsCollector;
-use App\Producer\JobFactory;
-use App\Producer\Producer;
-use App\Queue\InMemoryQueue;
-use App\Retry\ExponentialBackoffRetry;
-use App\Support\SystemClock;
-use App\Worker\WorkerPool;
+use PhpJobQueue\Dispatcher\JobDispatcher;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Master\QueueRuntime;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Producer\Producer;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Retry\ExponentialBackoffRetry;
+use PhpJobQueue\Support\SystemClock;
+use PhpJobQueue\Worker\WorkerPool;
 
 require __DIR__ . '/../vendor/autoload.php';
 

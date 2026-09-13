@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Worker;
+namespace PhpJobQueue\Worker;
 
-use App\Delivery\Delivery;
-use App\Job\Job;
-use App\Job\JobResult;
+use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\Job\Job;
+use PhpJobQueue\Job\JobResult;
 
 /**
  * What came back from a worker about one delivery.

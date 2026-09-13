@@ -2,16 +2,16 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Producer;
+namespace PhpJobQueue\Tests\Producer;
 
-use App\Job\JobId;
-use App\Job\JobPriority;
-use App\Job\JobState;
-use App\Metrics\MetricsCollector;
-use App\Producer\JobFactory;
-use App\Producer\Producer;
-use App\Queue\InMemoryQueue;
-use App\Tests\Support\FakeClock;
+use PhpJobQueue\Job\JobId;
+use PhpJobQueue\Job\JobPriority;
+use PhpJobQueue\Job\JobState;
+use PhpJobQueue\Metrics\MetricsCollector;
+use PhpJobQueue\Producer\JobFactory;
+use PhpJobQueue\Producer\Producer;
+use PhpJobQueue\Queue\InMemoryQueue;
+use PhpJobQueue\Tests\Support\FakeClock;
 use PHPUnit\Framework\TestCase;
 
 final class ProducerTest extends TestCase
