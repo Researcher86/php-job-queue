@@ -1129,11 +1129,18 @@ Reliable enough to study.
 
 ## Related projects
 
-Three repositories, one subject, in order of depth:
+Part of [**php-systems-lab**](https://github.com/Researcher86/php-systems-lab).
+Four repositories, one subject, in order of depth:
 
 * [**php-concurrency**](https://github.com/Researcher86/php-concurrency) —
   processes, forks, signals and IPC in PHP from the bottom up. The
   groundwork.
+* [**php-memory-lab**](https://github.com/Researcher86/php-memory-lab) — the
+  same groundwork with instruments on it: what a fork costs in pages, what a
+  reserved job costs when it is held in shared memory rather than passed over
+  a socket, and why its ring buffer loses to a Unix socket once the lock is
+  counted. The transport decisions this project makes are the ones it
+  measures.
 * [**php-worker-pool**](https://github.com/Researcher86/php-worker-pool) — a
   master process with an event loop, a pool of forked workers, autoscaling,
   recycling, telemetry over shared memory. How to keep N processes alive and
