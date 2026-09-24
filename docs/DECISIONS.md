@@ -542,9 +542,18 @@ seam visible.
 `startedAt`/`completedAt`/`lastError`. `markProcessing($now)` stamps
 `startedAt`; `markCompleted($now)`/`markFailed($now, $error)` stamp
 `completedAt`; `markRetry($availableAt, $error)` records `$error` as
-`lastError` but leaves `completedAt` alone. All four are optional
-parameters, so every existing call site keeps compiling and simply opts
-out of the recording.
+`lastError` but leaves `completedAt` alone.
+
+Every recording parameter follows one rule: **given, record it; omitted,
+leave whatever was already there alone.** Nothing on this class erases
+data by accident - `markFailed()` without a time does not eat a
+`completedAt` an earlier, better-informed call recorded, and an attempt
+that reports no message keeps the last known one. For `$error` an empty
+string counts as omitted too: that is what a no-argument
+`new RuntimeException()` reports, and it carries nothing worth keeping
+either. Each recording parameter is optional, so every existing call site
+keeps compiling and opts out simply by not passing anything - which means
+"do not touch", never "erase".
 
 **Rejected:** a list of per-attempt records (`[{attempt, startedAt,
 completedAt, error}, ...]`) kept on the job itself.
@@ -555,7 +564,10 @@ one field on the class shaped differently from every other piece of
 delivery bookkeeping, and it would grow without bound on a job that keeps
 retrying (nothing here ever trims it). Scalar, overwritten-per-attempt
 state matches `availableAt`'s own precedent exactly: both describe *the
-current attempt*, not the job's whole life. A caller that wants the full
+current attempt*, not the job's whole life - in practice the overwrite
+happens on every real dispatch, because `JobDispatcher` always has the
+clock in hand, and a caller without one adds nothing instead of keeping a
+stale snapshot. A caller that wants the full
 history already has the tool for it - the same durable log `JobStorage`
 writes to on every transition (see `FileStorage`'s docblock) already
 receives one row per `toArray()` snapshot, which is one row per attempt in

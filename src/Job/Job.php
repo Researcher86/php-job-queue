@@ -120,7 +120,11 @@ final class Job
 
     private ?float $availableAt;
 
-    /** When the CURRENT (most recent) attempt was dispatched to a worker. */
+    /** When the CURRENT (most recent) attempt was dispatched to a worker -
+     *  provided it was dispatched with a time in hand, which JobDispatcher
+     *  always does. A no-argument markProcessing() leaves this exactly as it
+     *  was, so the field only ever describes the current attempt when callers
+     *  keep passing a time. */
     private ?float $startedAt;
 
     /** When the job last reached a terminal outcome - COMPLETED, or FAILED
