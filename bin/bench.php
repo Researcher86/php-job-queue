@@ -15,7 +15,7 @@ use PhpJobQueue\Queue\InMemoryQueue;
 use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\WorkerPool;
 
-require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/bootstrap.php';
 
 /**
  * Throughput and latency under load - PLAN.md Phase 16's stress side.

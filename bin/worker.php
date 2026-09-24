@@ -13,7 +13,7 @@ use PhpJobQueue\Retry\ExponentialBackoffRetry;
 use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\WorkerPool;
 
-require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/bootstrap.php';
 
 /**
  * The long-running queue process - PLAN.md Phase 15, runnable.

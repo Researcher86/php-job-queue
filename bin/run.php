@@ -11,7 +11,7 @@ use PhpJobQueue\Queue\InMemoryQueue;
 use PhpJobQueue\Support\SystemClock;
 use PhpJobQueue\Worker\WorkerPool;
 
-require __DIR__ . '/../vendor/autoload.php';
+require __DIR__ . '/bootstrap.php';
 
 /**
  * `make run` - the whole lifecycle once, in one process, in a few lines:
