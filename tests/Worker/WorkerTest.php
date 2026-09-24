@@ -64,6 +64,88 @@ final class WorkerTest extends TestCase
         $worker->shutdown();
     }
 
+    public function testWorkerStartsWithNoTasksCounted(): void
+    {
+        $worker = new Worker(1, Handlers::succeeds());
+        $worker->spawn();
+
+        $this->assertSame(0, $worker->getTasksCompleted());
+        $this->assertSame(0, $worker->getTasksFailed());
+
+        $worker->shutdown();
+    }
+
+    public function testWorkerCountsASuccessfulTask(): void
+    {
+        $worker = new Worker(1, Handlers::succeeds());
+        $worker->spawn();
+
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
+        $worker->collect(null);
+
+        $this->assertSame(1, $worker->getTasksCompleted());
+        $this->assertSame(0, $worker->getTasksFailed());
+
+        $worker->shutdown();
+    }
+
+    public function testWorkerCountsAFailedTask(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {
+            throw new RuntimeException('boom');
+        });
+        $worker->spawn();
+
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
+        $worker->collect(null);
+
+        $this->assertSame(0, $worker->getTasksCompleted());
+        $this->assertSame(1, $worker->getTasksFailed());
+
+        $worker->shutdown();
+    }
+
+    public function testWorkerAccumulatesCountsAcrossSeveralTasks(): void
+    {
+        $attempt = 0;
+        $worker = new Worker(1, static function (Job $job) use (&$attempt): void {
+            $attempt++;
+            if ($attempt === 2) {
+                throw new RuntimeException('boom');
+            }
+        });
+        $worker->spawn();
+
+        foreach (['a', 'b', 'c'] as $type) {
+            $worker->assign(Deliveries::to($worker, Job::create(type: $type)));
+            $worker->collect(null);
+        }
+
+        $this->assertSame(2, $worker->getTasksCompleted());
+        $this->assertSame(1, $worker->getTasksFailed());
+
+        $worker->shutdown();
+    }
+
+    public function testACrashedWorkerDoesNotCountTheJobItWasHolding(): void
+    {
+        // Dying mid-job is neither a completion nor an application-level
+        // failure - WorkerOutcome's own null result says so, and the
+        // counters agree: this is the pool's crash accounting to make
+        // (totalCrashed()), not a task outcome.
+        $worker = new Worker(1, Handlers::succeeds());
+        $worker->spawn();
+
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
+        posix_kill($worker->getPid(), SIGKILL);
+        $worker->collect(null);
+
+        $this->assertSame(0, $worker->getTasksCompleted());
+        $this->assertSame(0, $worker->getTasksFailed());
+
+        $worker->shutdown();
+    }
+
     public function testWorkerBecomesBusyWhileProcessing(): void
     {
         $worker = new Worker(1, Handlers::succeeds());

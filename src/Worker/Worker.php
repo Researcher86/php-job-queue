@@ -147,6 +147,14 @@ final class Worker
 
     private ?Delivery $currentDelivery = null;
 
+    /** How many jobs this worker has answered, split by outcome - only for
+     *  an outcome a job actually reported. A worker that died holding a job
+     *  counts toward neither: that is a crash (the pool's own accounting),
+     *  not a task result. */
+    private int $tasksCompleted = 0;
+
+    private int $tasksFailed = 0;
+
     private mixed $stream = null;
 
     private int $pid = 0;
@@ -361,17 +369,36 @@ final class Worker
         }
 
         $data = json_decode($frame, true, flags: JSON_THROW_ON_ERROR);
+        $result = $this->decodeResult($data);
+
+        if ($result->isSuccess()) {
+            $this->tasksCompleted++;
+        } else {
+            $this->tasksFailed++;
+        }
 
         // BUSY -> IDLE, or DRAINING -> STOPPING for a worker that was
         // retired while it finished this last job.
         $this->apply('finish');
 
-        return new WorkerOutcome($delivery, $this->decodeResult($data));
+        return new WorkerOutcome($delivery, $result);
     }
 
     public function getId(): int
     {
         return $this->id;
+    }
+
+    /** How many jobs this worker has completed successfully. */
+    public function getTasksCompleted(): int
+    {
+        return $this->tasksCompleted;
+    }
+
+    /** How many jobs this worker has answered with a failure. */
+    public function getTasksFailed(): int
+    {
+        return $this->tasksFailed;
     }
 
     public function getStream(): mixed
