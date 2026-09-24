@@ -266,7 +266,7 @@ handler throws                     in the worker
         └─ over the socket
              └─ applyResult()
                   └─ handleFailure()
-                       ├─ attempts < maxAttempts?
+                       ├─ attempts < maxAttempts AND $shouldRetry(job, e)?
                        │    yes → RetryPolicy::nextDelay()
                        │          markRetry(now + delay)     READY, future
                        │          Queue::push()  →  the delayed heap
@@ -275,6 +275,11 @@ handler throws                     in the worker
                        │          DeadLetterQueue::add()
                        │          metrics: failed++, dlq++
 ```
+
+`$shouldRetry` is an optional constructor closure, checked first: a `false`
+sends the job to `markFailed()` no matter how many attempts are left -
+"this can never work," not "this ran out of chances." Null (the default)
+means every failure is eligible, the behavior before this closure existed.
 
 Note where the retry ends up: the **delayed heap**, because a READY job with
 a future `availableAt` is exactly what a backoff is. There is no separate
@@ -537,13 +542,18 @@ what an answer has to match.
 | `LaneSelector` | which priority gets the next turn | what a job is |
 | `Worker` | one process, the wire, running the handler | attempts, retries, the queue |
 | `WorkerPool` | N processes: which is free, which died | jobs |
-| `JobDispatcher` | what an answer means | how a worker talks, how a queue orders |
+| `JobDispatcher` | what an answer means, and (via an optional `$shouldRetry` closure) whether THIS failure is even eligible\* | how a worker talks, how a queue orders |
 | `VisibilityMonitor` | which delivery may answer for each job, and when its lease expires | why a job is in flight |
-| `RetryPolicy` | how long to wait | whether to retry at all |
+| `RetryPolicy` | how long to wait | whether to retry at all\* |
 | `DeadLetterQueue` | jobs that stopped being retried | when to stop |
 | `JobStorage` | a job's last known state, durably | job semantics |
 | `MetricsCollector` | counters and latency samples | what any of it means |
 | `QueueRuntime` | the loop and the signals | every decision inside a tick |
+
+\* Split two ways on purpose: `RetryPolicy` answers "how long," which only
+makes sense once "whether" is already yes - so "whether" is a separate,
+optional decision `JobDispatcher` itself makes, checked ahead of the
+attempts count, not folded into the same interface.
 
 The two that carry the most weight are `JobDispatcher` — the only thing that
 knows what an answer *means* — and `Job` itself, which is the only thing

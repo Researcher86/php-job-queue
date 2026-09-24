@@ -575,6 +575,45 @@ done", not a gap.
 
 ---
 
+## 21. Retry eligibility is a `Closure`, checked ahead of the attempts count
+
+**Chosen:** `JobDispatcher` takes an optional trailing
+`?Closure(Job, Throwable): bool $shouldRetry`. `handleFailure()` calls it
+before comparing `attempts` to `maxAttempts` - a `false` sends the job
+straight to `markFailed()` (and the DLQ, if one is attached) no matter how
+much budget was left. Null - the default - means every failure is
+eligible, exactly the behavior before this parameter existed.
+
+**Rejected:** a method on `RetryPolicy` (`shouldRetry()` alongside the
+existing `nextDelay()`). It reads better on paper - "the retry policy
+decides retries" - but it is a breaking change for anyone who has already
+implemented the interface, and the two questions do not actually share an
+answer: `nextDelay()` answers "how long," which only makes sense once
+"whether" is already yes. A policy that always retries but sometimes waits
+zero seconds and a policy that sometimes never retries are different
+concerns bolted onto one interface.
+
+**Why a `Closure`, not a new interface:** decision "Rejected outright"
+already made this call for handlers - `Worker`'s own constructor takes
+`Closure(Job): mixed`, not a `HandlerInterface`. A single-method interface
+whose only implementations would be one-line closures anyway is ceremony
+this project has consistently avoided.
+
+**Why checked ahead of the attempts count, not instead of it:** a job
+correctly identified as retryable by `$shouldRetry` still has to run out of
+attempts normally - this parameter only ever narrows what a job's own
+`maxAttempts` already allows, it never widens it.
+
+**Why the new parameter is last, not next to `$retryPolicy`:** the two are
+conceptually a pair, but `JobDispatcher`'s constructor is called
+positionally throughout this project's own test suite
+(`new JobDispatcher($queue, $pool, $retryPolicy, $clock)`, dozens of
+times) - inserting a parameter between two already-positional ones would
+have silently broken every one of them. Appended at the end, none of them
+needed to change.
+
+---
+
 ---
 
 ## Rejected outright

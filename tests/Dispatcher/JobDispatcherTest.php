@@ -23,6 +23,7 @@ use PhpJobQueue\Timeout\VisibilityMonitor;
 use PhpJobQueue\Worker\WorkerPool;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Throwable;
 
 final class JobDispatcherTest extends TestCase
 {
@@ -172,6 +173,76 @@ final class JobDispatcherTest extends TestCase
 
         $this->assertSame(JobState::COMPLETED, $job->getState());
         $this->assertSame(0, $queue->size());
+    }
+
+    public function testShouldRetryCanRefuseToRetryDespiteAttemptsRemaining(): void
+    {
+        $queue = new InMemoryQueue(new FakeClock());
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new RuntimeException('malformed payload');
+        });
+        $pool->start();
+
+        $dispatcher = new JobDispatcher(
+            $queue,
+            $pool,
+            new FixedDelayRetry(0),
+            clock: new FakeClock(),
+            shouldRetry: static fn (Job $job, Throwable $e): bool => $e->getMessage() !== 'malformed payload',
+        );
+
+        $job = Job::create(type: 'bad', maxAttempts: 5);
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        // Four attempts were left, and none of them were spent.
+        $this->assertSame(JobState::FAILED, $job->getState());
+        $this->assertSame(1, $job->getAttempts());
+        $this->assertSame(0, $queue->size());
+    }
+
+    public function testShouldRetryStillLetsAnEligibleFailureRetryNormally(): void
+    {
+        $queue = new InMemoryQueue(new FakeClock());
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new RuntimeException('database connection refused');
+        });
+        $pool->start();
+
+        $dispatcher = new JobDispatcher(
+            $queue,
+            $pool,
+            new FixedDelayRetry(0),
+            clock: new FakeClock(),
+            shouldRetry: static fn (Job $job, Throwable $e): bool => $e->getMessage() !== 'malformed payload',
+        );
+
+        $job = Job::create(type: 'flaky', maxAttempts: 3);
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(JobState::READY, $job->getState());
+        $this->assertSame(1, $queue->size());
+    }
+
+    public function testWithNoShouldRetryEveryFailureIsEligibleAsBefore(): void
+    {
+        $queue = new InMemoryQueue(new FakeClock());
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new RuntimeException('boom');
+        });
+        $pool->start();
+
+        $dispatcher = new JobDispatcher($queue, $pool, new FixedDelayRetry(0), new FakeClock());
+
+        $job = Job::create(type: 'bad', maxAttempts: 2);
+        $queue->push($job);
+
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(JobState::READY, $job->getState());
     }
 
     public function testJobGoesToAvailableWorker(): void

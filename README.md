@@ -326,6 +326,7 @@ $dispatcher = new JobDispatcher(
     dlq: $dlq,                  // null → exhausted jobs just end FAILED
     storage: $storage,          // null → nothing survives a restart
     metrics: $metrics,          // null → nothing is counted
+    shouldRetry: $shouldRetry,  // null → every failure is eligible
 );
 ```
 
@@ -360,8 +361,8 @@ What the dispatcher does with an answer:
 | answer | meaning | result |
 |---|---|---|
 | success | ACK | COMPLETED |
-| failure, attempts left | NACK | READY, after the retry delay |
-| failure, attempts gone | NACK | FAILED, plus a DLQ record |
+| failure, attempts left, `$shouldRetry` says yes (or is not set) | NACK | READY, after the retry delay |
+| failure, attempts gone, or `$shouldRetry` says no | NACK | FAILED, plus a DLQ record |
 | **null result** | the worker died holding the job | READY at once, worker replaced |
 | **not the current delivery** | a late answer for a lease that has been revoked | counted as a stale ACK, ignored |
 
@@ -399,6 +400,30 @@ doubling — and it would make the delays in an example unreadable.
 ```text
 attempt 1 ❌  →  wait 1s  →  attempt 2 ❌  →  wait 2s  →  attempt 3 ❌  →  DLQ
 ```
+
+### Not every failure deserves a retry
+
+`RetryPolicy` answers *how long* to wait - it has no opinion on *whether* to
+wait at all, and neither does `attempts < maxAttempts` by itself. A payload
+missing a required field will fail exactly the same way on attempt 3 as it
+did on attempt 1; spending the whole budget on it just delays reaching the
+DLQ.
+
+```php
+$dispatcher = new JobDispatcher(
+    $queue,
+    $pool,
+    new ExponentialBackoffRetry(),
+    $clock,
+    shouldRetry: static fn (Job $job, Throwable $e): bool =>
+        !$e instanceof MalformedPayloadException,
+);
+```
+
+Checked in `handleFailure()`, before the attempts count: a `false` sends the
+job to FAILED (and the DLQ, if attached) immediately, no matter how many
+attempts were left. Null - the default - means every failure is eligible,
+which is the behavior this project had before the parameter existed.
 
 ---
 
