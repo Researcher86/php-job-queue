@@ -412,7 +412,7 @@ Frame format, both directions:
 
 | direction | payload |
 |---|---|
-| parent → worker | `Job::toArray()` — id, type, payload, state, attempts, maxAttempts, createdAt, availableAt, priority, idempotencyKey |
+| parent → worker | `Job::toArray()` — id, type, payload, state, attempts, maxAttempts, createdAt, availableAt, startedAt, completedAt, lastError, priority, idempotencyKey |
 | worker → parent | `{success: bool, exceptionClass: ?string, exceptionMessage: ?string}` |
 
 `writeAll()` loops until every byte is out; `readExact()` loops until

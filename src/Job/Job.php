@@ -120,6 +120,20 @@ final class Job
 
     private ?float $availableAt;
 
+    /** When the CURRENT (most recent) attempt was dispatched to a worker. */
+    private ?float $startedAt;
+
+    /** When the job last reached a terminal outcome - COMPLETED, or FAILED
+     *  for good. Not set by a retry: the job has not finished, it is going
+     *  around again. */
+    private ?float $completedAt;
+
+    /** The most recent failure's message, from whichever attempt reported
+     *  one last - a retry counts, since it is a failure too, just not the
+     *  final one. Never cleared by an attempt that reports no message of
+     *  its own. */
+    private ?string $lastError;
+
     /**
      * @param array<string, mixed> $payload
      */
@@ -134,10 +148,16 @@ final class Job
         JobState $state,
         int $attempts = 0,
         ?float $availableAt = null,
+        ?float $startedAt = null,
+        ?float $completedAt = null,
+        ?string $lastError = null,
     ) {
         $this->state = $state;
         $this->attempts = $attempts;
         $this->availableAt = $availableAt;
+        $this->startedAt = $startedAt;
+        $this->completedAt = $completedAt;
+        $this->lastError = $lastError;
     }
 
     /**
@@ -216,6 +236,27 @@ final class Job
         return $this->availableAt;
     }
 
+    /** When the current (most recent) attempt was dispatched, or null before
+     *  the first one. */
+    public function getStartedAt(): ?float
+    {
+        return $this->startedAt;
+    }
+
+    /** When the job last reached a terminal outcome, or null while it is
+     *  still cycling through retries (or has not run at all). */
+    public function getCompletedAt(): ?float
+    {
+        return $this->completedAt;
+    }
+
+    /** The most recent failure's message, across every attempt so far -
+     *  or null if none has failed yet. */
+    public function getLastError(): ?string
+    {
+        return $this->lastError;
+    }
+
     /** @return array<string, mixed> */
     public function toArray(): array
     {
@@ -228,6 +269,9 @@ final class Job
             'maxAttempts' => $this->maxAttempts,
             'createdAt' => $this->createdAt,
             'availableAt' => $this->availableAt,
+            'startedAt' => $this->startedAt,
+            'completedAt' => $this->completedAt,
+            'lastError' => $this->lastError,
             'priority' => $this->priority->name,
             'idempotencyKey' => $this->idempotencyKey,
         ];
@@ -249,6 +293,9 @@ final class Job
             state: JobState::fromName((string) $data['state']),
             attempts: (int) ($data['attempts'] ?? 0),
             availableAt: isset($data['availableAt']) ? (float) $data['availableAt'] : null,
+            startedAt: isset($data['startedAt']) ? (float) $data['startedAt'] : null,
+            completedAt: isset($data['completedAt']) ? (float) $data['completedAt'] : null,
+            lastError: isset($data['lastError']) ? (string) $data['lastError'] : null,
         );
     }
 
@@ -270,24 +317,43 @@ final class Job
      * Handed to a worker. Consumes an attempt - see the class docblock on
      * why an attempt is a delivery - and clears availableAt, because a job
      * in a worker's hands is not waiting for anything.
+     *
+     * $now, if given, stamps this attempt's startedAt - overwriting
+     * whatever the previous attempt recorded, the same way attempts and
+     * availableAt already behave. Optional so a caller with no clock in
+     * reach (most of the test suite) is not forced to supply one.
      */
-    public function markProcessing(): void
+    public function markProcessing(?float $now = null): void
     {
         $this->apply('dispatch');
         $this->attempts++;
         $this->availableAt = null;
+        $this->startedAt = $now;
     }
 
-    /** ACK. */
-    public function markCompleted(): void
+    /** ACK. $now, if given, stamps completedAt. */
+    public function markCompleted(?float $now = null): void
     {
         $this->apply('complete');
+        $this->completedAt = $now;
     }
 
-    /** NACK with no attempts left - the end of the road, and the DLQ's input. */
-    public function markFailed(): void
+    /**
+     * NACK with no attempts left - the end of the road, and the DLQ's input.
+     *
+     * $now, if given, stamps completedAt; $error, if given, becomes
+     * lastError. A caller that has the exception in hand (JobDispatcher
+     * does, right here) can hand it over for free; one that doesn't leaves
+     * whatever the last attempt already recorded alone.
+     */
+    public function markFailed(?float $now = null, ?string $error = null): void
     {
         $this->apply('fail');
+        $this->completedAt = $now;
+
+        if ($error !== null) {
+            $this->lastError = $error;
+        }
     }
 
     /**
@@ -305,11 +371,20 @@ final class Job
      * visibility timeout that expired. $availableAt is now for an immediate
      * retry, or later for one under a backoff policy - which is why a retry
      * and a delayed job go through the same scheduler.
+     *
+     * $error, if given, becomes lastError: a retry is this attempt's own
+     * failure, just not the job's final one, so it is worth recording the
+     * same way markFailed() does. completedAt is deliberately left alone -
+     * the job has not finished, it is going around again.
      */
-    public function markRetry(float $availableAt): void
+    public function markRetry(float $availableAt, ?string $error = null): void
     {
         $this->apply('retry');
         $this->availableAt = $availableAt;
+
+        if ($error !== null) {
+            $this->lastError = $error;
+        }
     }
 
     /**

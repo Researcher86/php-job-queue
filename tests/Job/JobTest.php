@@ -138,6 +138,107 @@ final class JobTest extends TestCase
         $job->markReady($this->clock->now());
     }
 
+    public function testMarkProcessingRecordsWhenTheAttemptStarted(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+
+        $job->markProcessing(1000.0);
+
+        $this->assertSame(1000.0, $job->getStartedAt());
+        $this->assertNull($job->getCompletedAt());
+    }
+
+    public function testMarkProcessingWithNoTimeLeavesStartedAtNull(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+
+        $job->markProcessing();
+
+        $this->assertNull($job->getStartedAt());
+    }
+
+    public function testMarkCompletedRecordsWhenTheJobFinished(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+
+        $job->markCompleted(1000.5);
+
+        $this->assertSame(1000.5, $job->getCompletedAt());
+        $this->assertNull($job->getLastError());
+    }
+
+    public function testMarkFailedRecordsWhenItFinishedAndWhy(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+
+        $job->markFailed(1000.2, 'database connection refused');
+
+        $this->assertSame(1000.2, $job->getCompletedAt());
+        $this->assertSame('database connection refused', $job->getLastError());
+    }
+
+    public function testMarkFailedWithNoReasonLeavesTheLastErrorUnchanged(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+        $job->markFailed(1000.1, 'first attempt broke');
+
+        // A human requeues the dead-lettered job for one more try, which
+        // then fails with no message at all - the earlier reason should not
+        // be silently erased by a blank one.
+        $job->markRequeued(1001.0);
+        $job->markProcessing(1001.0);
+        $job->markFailed(1001.1);
+
+        $this->assertSame('first attempt broke', $job->getLastError());
+    }
+
+    public function testMarkRetryRecordsWhyThisAttemptFailed(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+
+        $job->markRetry(1005.0, 'timed out talking to the payment gateway');
+
+        $this->assertSame('timed out talking to the payment gateway', $job->getLastError());
+        // Retry is not terminal - nothing has "completed" yet.
+        $this->assertNull($job->getCompletedAt());
+    }
+
+    public function testANewAttemptOverwritesThePreviousStartedAt(): void
+    {
+        // started_at tracks the CURRENT/most recent attempt - it is
+        // deliberately overwritten by the next markProcessing(), the same
+        // way attempts and availableAt already behave.
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+        $job->markRetry(1005.0, 'first try failed');
+
+        // markRetry() already put the job back in READY - the next attempt
+        // is dispatched straight from there.
+        $job->markProcessing(1005.0);
+
+        $this->assertSame(1005.0, $job->getStartedAt());
+    }
+
+    public function testJobStartsWithNoAttemptMetadata(): void
+    {
+        $job = Job::create(type: 'test');
+
+        $this->assertNull($job->getStartedAt());
+        $this->assertNull($job->getCompletedAt());
+        $this->assertNull($job->getLastError());
+    }
+
     public function testJobCanBeRetriedFromProcessing(): void
     {
         $job = Job::create(type: 'test');
@@ -243,8 +344,8 @@ final class JobTest extends TestCase
     {
         $job = Job::create(type: 'send_email', payload: ['email' => 'user@example.com'], maxAttempts: 5);
         $job->markReady(1000.0);
-        $job->markProcessing();
-        $job->markRetry(1060.0);
+        $job->markProcessing(1000.0);
+        $job->markRetry(1060.0, 'smtp connection refused');
 
         $restored = Job::fromArray($job->toArray());
 
@@ -256,6 +357,20 @@ final class JobTest extends TestCase
         $this->assertSame($job->getMaxAttempts(), $restored->getMaxAttempts());
         $this->assertSame($job->getCreatedAt(), $restored->getCreatedAt());
         $this->assertSame($job->getAvailableAt(), $restored->getAvailableAt());
+        $this->assertSame($job->getStartedAt(), $restored->getStartedAt());
+        $this->assertSame($job->getCompletedAt(), $restored->getCompletedAt());
+        $this->assertSame($job->getLastError(), $restored->getLastError());
+    }
+
+    public function testAJobWithNoAttemptMetadataRoundTripsThatWay(): void
+    {
+        $job = Job::create(type: 'test');
+
+        $restored = Job::fromArray($job->toArray());
+
+        $this->assertNull($restored->getStartedAt());
+        $this->assertNull($restored->getCompletedAt());
+        $this->assertNull($restored->getLastError());
     }
 
     public function testAnUnknownStateNameIsRejected(): void

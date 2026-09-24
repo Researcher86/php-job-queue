@@ -376,7 +376,7 @@ final class JobDispatcher
         // spend an hour queued behind a busy pool.
         $availableAt = $job->getAvailableAt();
 
-        $job->markProcessing();
+        $job->markProcessing($this->clock->now());
         $delivery = $this->monitor->track($job, $worker->getId());
 
         // Written BEFORE the job leaves the process, so that a crash
@@ -406,7 +406,7 @@ final class JobDispatcher
             $worker->assign($delivery);
         } catch (WorkerDiedException) {
             $this->monitor->release($delivery);
-            $job->markRetry($this->clock->now());
+            $job->markRetry($this->clock->now(), 'Worker died before the job could be assigned.');
             $this->queue->push($job);
             $this->workerPool->maintain();
 
@@ -453,7 +453,7 @@ final class JobDispatcher
         $this->monitor->release($delivery);
 
         if ($result === null) {
-            $job->markRetry($this->clock->now());
+            $job->markRetry($this->clock->now(), 'Worker died while holding the job.');
             $this->queue->push($job);
             $this->workerPool->replaceDeadWorkers();
             return;
@@ -465,7 +465,7 @@ final class JobDispatcher
         );
 
         if ($result->isSuccess()) {
-            $job->markCompleted();
+            $job->markCompleted($this->clock->now());
             $this->persist($job);
             $this->metrics?->increment(MetricsCollector::JOBS_COMPLETED);
             $this->metrics?->recordLatency(
@@ -482,7 +482,7 @@ final class JobDispatcher
     {
         if ($job->getAttempts() < $job->getMaxAttempts()) {
             $delay = $this->retryPolicy?->nextDelay($job) ?? 0;
-            $job->markRetry($this->clock->now() + $delay);
+            $job->markRetry($this->clock->now() + $delay, $exception?->getMessage());
 
             // No persist() here: push() writes the job it takes in. See
             // persist() for who owns which write.
@@ -491,7 +491,7 @@ final class JobDispatcher
             return;
         }
 
-        $job->markFailed();
+        $job->markFailed($this->clock->now(), $exception?->getMessage());
         $this->persist($job);
         $this->metrics?->increment(MetricsCollector::JOBS_FAILED);
         if ($this->dlq !== null && $exception !== null) {

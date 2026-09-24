@@ -81,6 +81,64 @@ final class JobDispatcherTest extends TestCase
         $this->assertSame(1, $queue->size());
     }
 
+    public function testSuccessfulJobRecordsWhenItStartedAndFinished(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, Handlers::succeeds());
+        $pool->start();
+
+        $job = Job::create(type: 'ok', clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(1000.0, $job->getStartedAt());
+        $this->assertSame(1000.0, $job->getCompletedAt());
+        $this->assertNull($job->getLastError());
+    }
+
+    public function testFailedJobRecordsWhenItFinishedAndWhy(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new RuntimeException('boom');
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'bad', maxAttempts: 1, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock);
+        $dispatcher->dispatchNext();
+
+        $this->assertSame(1000.0, $job->getStartedAt());
+        $this->assertSame(1000.0, $job->getCompletedAt());
+        $this->assertSame('boom', $job->getLastError());
+    }
+
+    public function testARetriedJobRecordsTheFailureButNotAsCompleted(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            throw new RuntimeException('temporary outage');
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'bad', maxAttempts: 2, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, new FixedDelayRetry(0), $clock);
+        $dispatcher->dispatchNext();
+
+        $this->assertSame('temporary outage', $job->getLastError());
+        // Sent back to READY, not finished - completed_at stays untouched.
+        $this->assertNull($job->getCompletedAt());
+    }
+
     public function testRetriedJobIsDispatchedAgainUntilFailed(): void
     {
         [$queue, , $dispatcher] = $this->dispatcherWith(static function (Job $job): void {

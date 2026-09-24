@@ -536,6 +536,45 @@ seam visible.
 
 ---
 
+## 20. Attempt metadata is scalar, current-attempt state - not a history
+
+**Chosen:** `Job` gained three fields alongside `attempts`:
+`startedAt`/`completedAt`/`lastError`. `markProcessing($now)` stamps
+`startedAt`; `markCompleted($now)`/`markFailed($now, $error)` stamp
+`completedAt`; `markRetry($availableAt, $error)` records `$error` as
+`lastError` but leaves `completedAt` alone. All four are optional
+parameters, so every existing call site keeps compiling and simply opts
+out of the recording.
+
+**Rejected:** a list of per-attempt records (`[{attempt, startedAt,
+completedAt, error}, ...]`) kept on the job itself.
+
+**Why:** `Job` already answers "how many attempts" with a counter, not a
+list - `attempts` is incremented, not appended to. A history would be the
+one field on the class shaped differently from every other piece of
+delivery bookkeeping, and it would grow without bound on a job that keeps
+retrying (nothing here ever trims it). Scalar, overwritten-per-attempt
+state matches `availableAt`'s own precedent exactly: both describe *the
+current attempt*, not the job's whole life. A caller that wants the full
+history already has the tool for it - the same durable log `JobStorage`
+writes to on every transition (see `FileStorage`'s docblock) already
+receives one row per `toArray()` snapshot, which is one row per attempt in
+practice.
+
+**Why `markRetry()` also takes `$error`:** a retry is not a lesser event
+than a `markFailed()` - it is this attempt's own failure, the only
+difference being attempts are left to spend. Leaving `lastError` null until
+the FINAL attempt would make "why is this job stuck retrying" answerable
+only by reading the log across several rows instead of asking the job
+directly.
+
+**Why `completedAt` is NOT touched by `markRetry()`:** the field means "the
+job finished" - and a job going back to READY has not. A stuck-mid-retry
+job's `completedAt` staying null is the correct answer to "is this job
+done", not a gap.
+
+---
+
 ---
 
 ## Rejected outright
