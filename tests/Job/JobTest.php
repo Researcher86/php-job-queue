@@ -215,16 +215,14 @@ final class JobTest extends TestCase
 
     public function testANewAttemptOverwritesThePreviousStartedAt(): void
     {
-        // started_at tracks the CURRENT/most recent attempt - it is
-        // deliberately overwritten by the next markProcessing(), the same
-        // way attempts and availableAt already behave.
+        // started_at tracks the CURRENT/most recent attempt: given a REAL
+        // time, markProcessing() does overwrite whatever an earlier attempt
+        // recorded (contrast testMarkProcessingWithNoTimeLeavesStartedAtUnchanged,
+        // where omitting the time leaves it alone instead).
         $job = Job::create(type: 'test');
         $job->markReady($this->clock->now());
         $job->markProcessing(1000.0);
         $job->markRetry(1005.0, 'first try failed');
-
-        // markRetry() already put the job back in READY - the next attempt
-        // is dispatched straight from there.
         $job->markProcessing(1005.0);
 
         $this->assertSame(1005.0, $job->getStartedAt());
@@ -237,6 +235,63 @@ final class JobTest extends TestCase
         $this->assertNull($job->getStartedAt());
         $this->assertNull($job->getCompletedAt());
         $this->assertNull($job->getLastError());
+    }
+
+    public function testMarkFailedWithNoTimeLeavesCompletedAtUnchanged(): void
+    {
+        // $now and $error sit right next to each other in markFailed()'s
+        // signature and must behave the same way when omitted: neither
+        // clears what a previous, better-informed call already recorded.
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+        $job->markFailed(1000.5, 'first failure');
+
+        $job->markRequeued(1001.0);
+        $job->markProcessing(1001.0);
+        $job->markFailed();
+
+        $this->assertSame(1000.5, $job->getCompletedAt());
+    }
+
+    public function testMarkProcessingWithNoTimeLeavesStartedAtUnchanged(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+        $job->markRetry(1005.0);
+
+        $job->markProcessing();
+
+        $this->assertSame(1000.0, $job->getStartedAt());
+    }
+
+    public function testMarkCompletedWithNoTimeLeavesCompletedAtUnchanged(): void
+    {
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+
+        $job->markCompleted();
+
+        $this->assertNull($job->getCompletedAt());
+    }
+
+    public function testAnEmptyExceptionMessageDoesNotOverwriteLastError(): void
+    {
+        // new RuntimeException() with no message getMessage()s as '', not
+        // null - markFailed()'s own "no message means leave it alone" check
+        // must treat that the same way it treats an actual null.
+        $job = Job::create(type: 'test');
+        $job->markReady($this->clock->now());
+        $job->markProcessing(1000.0);
+        $job->markFailed(1000.1, 'a real reason');
+
+        $job->markRequeued(1001.0);
+        $job->markProcessing(1001.0);
+        $job->markFailed(1001.1, '');
+
+        $this->assertSame('a real reason', $job->getLastError());
     }
 
     public function testJobCanBeRetriedFromProcessing(): void

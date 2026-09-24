@@ -150,7 +150,18 @@ final class Worker
     /** How many jobs this worker has answered, split by outcome - only for
      *  an outcome a job actually reported. A worker that died holding a job
      *  counts toward neither: that is a crash (the pool's own accounting),
-     *  not a task result. */
+     *  not a task result.
+     *
+     *  Two things these are NOT: a durable metric (a replaced worker - see
+     *  WorkerPool::replaceDeadWorkers() - starts a fresh Worker object at
+     *  zero; anything meant to survive a replacement belongs in
+     *  MetricsCollector, which is process-wide), and an authoritative
+     *  record of whose answer actually moved a job forward. This worker
+     *  genuinely answered; whether JobDispatcher::applyResult() then
+     *  accepted that answer or discarded it as stale (a late reply for a
+     *  delivery a visibility-timeout requeue already superseded - see
+     *  Delivery) is a question these counters cannot answer, because the
+     *  worker itself has no way to know either. */
     private int $tasksCompleted = 0;
 
     private int $tasksFailed = 0;
@@ -389,13 +400,18 @@ final class Worker
         return $this->id;
     }
 
-    /** How many jobs this worker has completed successfully. */
+    /**
+     * How many jobs this worker has completed successfully - counts this
+     * worker's own answers, not confirmed outcomes; resets to 0 if this
+     * worker is ever replaced. See $tasksCompleted's own docblock for both
+     * caveats in full.
+     */
     public function getTasksCompleted(): int
     {
         return $this->tasksCompleted;
     }
 
-    /** How many jobs this worker has answered with a failure. */
+    /** The failure counterpart of getTasksCompleted() - same two caveats. */
     public function getTasksFailed(): int
     {
         return $this->tasksFailed;

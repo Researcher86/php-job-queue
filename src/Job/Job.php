@@ -316,11 +316,15 @@ final class Job
     /**
      * Handed to a worker. Consumes an attempt - see the class docblock on
      * why an attempt is a delivery - and clears availableAt, because a job
-     * in a worker's hands is not waiting for anything.
+     * in a worker's hands is not waiting for anything (that one IS always
+     * cleared, unconditionally - it is not an optional recording parameter,
+     * there is nothing to preserve once a job leaves READY).
      *
-     * $now, if given, stamps this attempt's startedAt - overwriting
-     * whatever the previous attempt recorded, the same way attempts and
-     * availableAt already behave. Optional so a caller with no clock in
+     * $now, if given, stamps this attempt's startedAt. Omitted, startedAt is
+     * left exactly as it was - never cleared - the same "give it or leave
+     * it alone" rule every optional recording parameter on this class
+     * follows ($now on markCompleted()/markFailed(), $error on
+     * markFailed()/markRetry()). Optional so a caller with no clock in
      * reach (most of the test suite) is not forced to supply one.
      */
     public function markProcessing(?float $now = null): void
@@ -328,30 +332,47 @@ final class Job
         $this->apply('dispatch');
         $this->attempts++;
         $this->availableAt = null;
-        $this->startedAt = $now;
+
+        if ($now !== null) {
+            $this->startedAt = $now;
+        }
     }
 
-    /** ACK. $now, if given, stamps completedAt. */
+    /**
+     * ACK. $now, if given, stamps completedAt; omitted, completedAt is left
+     * exactly as it was - never cleared. The same "give it or leave it
+     * alone" rule every optional recording parameter on this class follows,
+     * $error on markFailed()/markRetry() included.
+     */
     public function markCompleted(?float $now = null): void
     {
         $this->apply('complete');
-        $this->completedAt = $now;
+
+        if ($now !== null) {
+            $this->completedAt = $now;
+        }
     }
 
     /**
      * NACK with no attempts left - the end of the road, and the DLQ's input.
      *
-     * $now, if given, stamps completedAt; $error, if given, becomes
-     * lastError. A caller that has the exception in hand (JobDispatcher
-     * does, right here) can hand it over for free; one that doesn't leaves
-     * whatever the last attempt already recorded alone.
+     * $now and $error each independently follow the same rule: given, they
+     * are recorded; omitted (or, for $error, empty - the message a
+     * no-argument `new RuntimeException()` reports, which carries nothing
+     * worth keeping either), whatever the previous attempt already recorded
+     * stays exactly as it was. A caller that has the exception in hand
+     * (JobDispatcher does, right here) can hand both over for free; one
+     * that doesn't loses nothing that was already known.
      */
     public function markFailed(?float $now = null, ?string $error = null): void
     {
         $this->apply('fail');
-        $this->completedAt = $now;
 
-        if ($error !== null) {
+        if ($now !== null) {
+            $this->completedAt = $now;
+        }
+
+        if ($error !== null && $error !== '') {
             $this->lastError = $error;
         }
     }
@@ -382,7 +403,7 @@ final class Job
         $this->apply('retry');
         $this->availableAt = $availableAt;
 
-        if ($error !== null) {
+        if ($error !== null && $error !== '') {
             $this->lastError = $error;
         }
     }
