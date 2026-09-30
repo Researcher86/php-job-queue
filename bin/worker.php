@@ -18,7 +18,7 @@ require __DIR__ . '/bootstrap.php';
 /**
  * The long-running queue process - PLAN.md Phase 15, runnable.
  *
- *   make docker-run-worker
+ *   make run-worker
  *
  * Then, from another shell, watch a graceful shutdown happen:
  *

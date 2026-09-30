@@ -1,5 +1,7 @@
 # PHP Job Queue
 
+**[🧪 PHP Systems Lab](https://github.com/Researcher86/php-systems-lab)** · Level 4 of 8 · ← [`php-worker-pool`](https://github.com/Researcher86/php-worker-pool) · [`php-mini-cache`](https://github.com/Researcher86/php-mini-cache) →
+
 > A reliable asynchronous job queue, built small enough to read.
 
 This repository answers one question by building the answer:
@@ -32,19 +34,22 @@ scheduling` · `Metrics` · `Graceful shutdown` · `Stress and chaos tests`
 
 ```bash
 make build              # docker image
-make docker-install     # composer install
-make docker-test        # the whole suite
-make docker-analyse     # phpstan, level 8
-make docker-lint        # php-cs-fixer, check only
+make install            # composer install
+make test               # the whole suite
+make analyse            # phpstan, level 8
+make format-check       # php-cs-fixer, check only
+make format             # php-cs-fixer, apply
 
-make docker-run                              # the lifecycle once
-make docker-run-worker                       # the long-running process
-make docker-example EXAMPLE=worker-crash     # one mechanism at a time
-make docker-bench ARGS="10000 8"             # throughput and latency
+make run                              # the lifecycle once
+make run-worker                       # the long-running process
+make example EXAMPLE=worker-crash     # one mechanism at a time
+make bench ARGS="10000 8"             # throughput and latency
 ```
 
-Every target has a non-Docker twin (`make test`, `make run`, …) if you have
-PHP 8.5 with `pcntl` and `posix` locally.
+Every target runs inside the Docker container. Without Docker, the same
+commands are available as Composer scripts (`composer test`, `composer
+analyse`, `composer format:check`) if you have PHP 8.5 with `pcntl` and
+`posix` locally.
 
 ---
 
@@ -75,7 +80,7 @@ PHP 8.5 with `pcntl` and `posix` locally.
 23. [Project layout](#project-layout)
 24. [Engineering questions, answered](#engineering-questions-answered)
 25. [What this is not](#what-this-is-not)
-26. [Related projects](#related-projects)
+26. [PHP Systems Lab](#php-systems-lab)
 
 ---
 
@@ -679,7 +684,7 @@ would ever complain about one. The retry path did write `READY` twice until
 that test existed.
 
 Measured, 10,000 no-op jobs on 8 workers
-(`make docker-bench ARGS="10000 8 0 file"`):
+(`make bench ARGS="10000 8 0 file"`):
 
 | storage | throughput | time in storage | per write | log |
 |---|---:|---:|---:|---|
@@ -721,7 +726,7 @@ weighted round robin (5:3:1)   H H H H H N N N L H H H H H N N N L H H
                                low-cleanup ran
 ```
 
-That is real output from `make docker-example EXAMPLE=priority-jobs`, over
+That is real output from `make example EXAMPLE=priority-jobs`, over
 the same load: a steady stream of HIGH work, one job arriving for every job
 served, plus a backlog of NORMAL and LOW that arrived first. Under strict
 priority the backlog never moves. Not "moves late" — never. Nothing in that
@@ -938,11 +943,11 @@ and leave the seam visible.
 ## Experiments
 
 ```bash
-make docker-example EXAMPLE=basic-job        # the minimal milestone
-make docker-example EXAMPLE=failed-job       # retries → backoff → DLQ → manual retry
-make docker-example EXAMPLE=delayed-job      # deadline order, not push order
-make docker-example EXAMPLE=worker-crash     # kill -9 mid-job, job survives
-make docker-example EXAMPLE=priority-jobs    # starvation, and its cure
+make example EXAMPLE=basic-job        # the minimal milestone
+make example EXAMPLE=failed-job       # retries → backoff → DLQ → manual retry
+make example EXAMPLE=delayed-job      # deadline order, not push order
+make example EXAMPLE=worker-crash     # kill -9 mid-job, job survives
+make example EXAMPLE=priority-jobs    # starvation, and its cure
 ```
 
 `worker-crash` prints this, and it is worth reading line by line:
@@ -961,7 +966,7 @@ Different pid, second attempt, same job.
 
 ### Break it yourself
 
-**Watch a graceful shutdown.** `make docker-run-worker`, then from another
+**Watch a graceful shutdown.** `make run-worker`, then from another
 shell:
 
 ```bash
@@ -1007,7 +1012,7 @@ whole runtime instead and see what the log alone can restore.
 
 ## Performance
 
-`make docker-bench ARGS="<jobs> <workers> <work-microseconds> <storage>"`,
+`make bench ARGS="<jobs> <workers> <work-microseconds> <storage>"`,
 no-op handlers, 8 workers, on the `php:8.5-cli` image:
 
 | jobs | drained in | throughput | peak memory | queue wait (avg) | execution (avg) |
@@ -1152,27 +1157,47 @@ Reliable enough to study.
 
 ---
 
-## Related projects
+## PHP Systems Lab
 
-Part of [**php-systems-lab**](https://github.com/Researcher86/php-systems-lab).
-Four repositories, one subject, in order of depth:
+This project is part of [**PHP Systems Lab**](https://github.com/Researcher86/php-systems-lab) — a collection of small
+educational PHP projects that rebuild the mechanisms behind backend
+infrastructure in order to understand them. The recommended order:
 
-* [**php-concurrency**](https://github.com/Researcher86/php-concurrency) —
-  processes, forks, signals and IPC in PHP from the bottom up. The
-  groundwork.
-* [**php-memory-lab**](https://github.com/Researcher86/php-memory-lab) — the
-  same groundwork with instruments on it: what a fork costs in pages, what a
-  reserved job costs when it is held in shared memory rather than passed over
-  a socket, and why its ring buffer loses to a Unix socket once the lock is
-  counted. The transport decisions this project makes are the ones it
-  measures.
-* [**php-worker-pool**](https://github.com/Researcher86/php-worker-pool) — a
-  master process with an event loop, a pool of forked workers, autoscaling,
-  recycling, telemetry over shared memory. How to keep N processes alive and
-  busy.
-* **php-job-queue** (this one) — what happens to the *work* when those
-  processes fail. Worker lifecycle is not job lifecycle, and this is the
-  half of the problem the pool does not answer.
+| Level | Project | Focus |
+| ----- | ------- | ----- |
+| 1 | 🧠 [`php-memory-lab`](https://github.com/Researcher86/php-memory-lab) | memory, RSS, fork, copy-on-write, `mmap`, shared memory, FFI |
+| 2 | ⚡ [`php-concurrency`](https://github.com/Researcher86/php-concurrency) | processes, IPC, concurrency patterns, event loops, Fibers (course in Russian) |
+| 3 | ⚙️ [`php-worker-pool`](https://github.com/Researcher86/php-worker-pool) | persistent master/worker pool, supervision, graceful shutdown |
+| **4** | 📬 **`php-job-queue`** (this project) | **reliable background jobs: delivery leases, ACK, retries, DLQ** |
+| 5 | 💾 [`php-mini-cache`](https://github.com/Researcher86/php-mini-cache) | event-driven in-memory server: RESP, pipelining, TTL, Pub/Sub |
+| 6 | 🌐 [`php-mini-http-server`](https://github.com/Researcher86/php-mini-http-server) | event-driven HTTP server: parsing, routing, middleware, keep-alive |
+| 7 | 🗄️ [`php-mini-database`](https://github.com/Researcher86/php-mini-database) | relational engine: pages, B-trees, SQL, transactions, WAL, recovery |
+| 8 | 🏗️ [`php-systems-platform`](https://github.com/Researcher86/php-systems-platform) | integration of the components into one backend platform |
+
+These are teaching projects, not libraries: a mechanism travels between them
+by being read in one and reimplemented in the next. Levels 1–7 do not depend
+on each other as packages. Only [`php-systems-platform`](https://github.com/Researcher86/php-systems-platform) requires the
+five components (worker pool, job queue, cache, HTTP server, database)
+through Composer and runs them together as one system.
+
+### How this project relates
+
+* **[`php-concurrency`](https://github.com/Researcher86/php-concurrency)** — processes, forks, signals and IPC in PHP
+  from the bottom up. The groundwork.
+* **[`php-memory-lab`](https://github.com/Researcher86/php-memory-lab)** — the same groundwork with instruments on it:
+  what a fork costs in pages, what a reserved job costs when it is held in
+  shared memory rather than passed over a socket, and why its ring buffer
+  loses to a Unix socket once the lock is counted. The transport decisions
+  this project makes are the ones it measures.
+* **[`php-worker-pool`](https://github.com/Researcher86/php-worker-pool)** — a master process with an event loop, a pool
+  of forked workers, autoscaling, recycling, telemetry over shared memory.
+  How to keep N processes alive and busy.
+* **`php-job-queue`** (this one) — what happens to the *work* when those
+  processes fail. Worker lifecycle is not job lifecycle, and this is the half
+  of the problem the pool does not answer.
+* **[`php-systems-platform`](https://github.com/Researcher86/php-systems-platform)** — runs this queue as its asynchronous
+  tier (`src/Queue/`: `Producer`, `JobDispatcher`, `FileStorage`,
+  `IdempotencyGuard`).
 
 ---
 

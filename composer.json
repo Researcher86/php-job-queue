@@ -1,5 +1,5 @@
 {
-    "name": "tanat/php-job-queue",
+    "name": "researcher86/php-job-queue",
     "type": "project",
     "license": "MIT",
     "autoload": {
@@ -26,8 +26,8 @@
     "scripts": {
         "test": "phpunit",
         "analyse": "phpstan analyse",
-        "lint": "php-cs-fixer check --diff",
-        "fix": "php-cs-fixer fix"
+        "format": "php-cs-fixer fix",
+        "format:check": "php-cs-fixer check --diff"
     },
     "config": {
         "sort-packages": true

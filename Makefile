@@ -1,41 +1,5 @@
-.PHONY: install test analyse lint fix run up down build shell \
-        docker-install docker-test docker-analyse docker-lint docker-fix \
-        docker-run docker-run-worker docker-run-debug run-worker \
-        bench docker-bench example docker-example
-
-install:
-	composer install
-
-test:
-	vendor/bin/phpunit
-
-analyse:
-	vendor/bin/phpstan analyse
-
-# check reports without touching anything (what CI runs); fix rewrites.
-lint:
-	vendor/bin/php-cs-fixer check --diff
-
-fix:
-	vendor/bin/php-cs-fixer fix
-
-run:
-	php bin/run.php
-
-# The long-running process. SIGTERM it from another shell to watch a
-# graceful shutdown: `docker compose exec php pkill -TERM -f bin/worker.php`
-run-worker:
-	php bin/worker.php
-
-# make bench ARGS="10000 8 0 file"
-#   -> <jobs> <workers> <work-microseconds> <none|memory|file>
-bench:
-	php bin/bench.php $(ARGS)
-
-# One mechanism at a time: basic-job, failed-job, delayed-job,
-# worker-crash, priority-jobs.
-example:
-	php examples/$(EXAMPLE).php
+.PHONY: up down build shell install test analyse format format-check \
+        run run-debug run-worker bench example
 
 up:
 	docker compose up -d
@@ -49,32 +13,38 @@ build:
 shell: up
 	docker compose exec php bash
 
-docker-install: up
+install: up
 	docker compose exec php composer install
 
-docker-test: up
+test: up
 	docker compose exec php composer test
 
-docker-analyse: up
+analyse: up
 	docker compose exec php composer analyse
 
-docker-lint: up
-	docker compose exec php composer lint
-
-docker-fix: up
-	docker compose exec php composer fix
-
-docker-run: up
+run: up
 	docker compose exec php php bin/run.php
 
-docker-run-worker: up
+run-debug: up
+	docker compose exec php bash -c "XDEBUG_TRIGGER=1 php bin/run.php"
+
+# The long-running process. SIGTERM it from another shell to watch a
+# graceful shutdown: `docker compose exec php pkill -TERM -f bin/worker.php`
+run-worker: up
 	docker compose exec php php bin/worker.php
 
-docker-bench: up
+# make bench ARGS="10000 8 0 file"
+#   -> <jobs> <workers> <work-microseconds> <none|memory|file>
+bench: up
 	docker compose exec php php bin/bench.php $(ARGS)
 
-docker-example: up
+# One mechanism at a time: basic-job, failed-job, delayed-job,
+# worker-crash, priority-jobs.
+example: up
 	docker compose exec php php examples/$(EXAMPLE).php
 
-docker-run-debug: up
-	docker compose exec php bash -c "XDEBUG_TRIGGER=1 php bin/run.php"
+format: up
+	docker compose exec php composer format
+
+format-check: up
+	docker compose exec php composer format:check

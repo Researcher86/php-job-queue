@@ -48,17 +48,17 @@ final class BootstrapTest extends TestCase
 
     public function testFindsTheConsumersAutoloaderWhenInstalledAsADependency(): void
     {
-        // vendor/tanat/php-job-queue/bin/bootstrap.php, with no
+        // vendor/researcher86/php-job-queue/bin/bootstrap.php, with no
         // vendor/autoload.php of its own anywhere under
-        // vendor/tanat/php-job-queue/ - only the CONSUMING project's own,
+        // vendor/researcher86/php-job-queue/ - only the CONSUMING project's own,
         // three levels further up.
         $marker = $this->buildTree(
             $this->tmpDir . '/consumer',
-            bootstrapAt: 'vendor/tanat/php-job-queue/bin',
+            bootstrapAt: 'vendor/researcher86/php-job-queue/bin',
             autoloadAt: '',
         );
 
-        $this->assertRequireSucceeds($this->tmpDir . '/consumer/vendor/tanat/php-job-queue/bin/bootstrap.php');
+        $this->assertRequireSucceeds($this->tmpDir . '/consumer/vendor/researcher86/php-job-queue/bin/bootstrap.php');
         $this->assertFileExists($marker);
     }
 

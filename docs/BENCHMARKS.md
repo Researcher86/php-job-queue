@@ -4,7 +4,7 @@ Numbers from `bin/bench.php`, and what they mean. Everything here is
 reproducible:
 
 ```bash
-make docker-bench ARGS="<jobs> <workers> <work-microseconds> <storage>"
+make bench ARGS="<jobs> <workers> <work-microseconds> <storage>"
 ```
 
 Measured on the project's own `php:8.5-cli` image, 12 cores available,

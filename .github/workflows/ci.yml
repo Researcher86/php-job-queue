@@ -22,4 +22,4 @@ jobs:
 
       - run: composer analyse
 
-      - run: composer lint
+      - run: composer format:check
