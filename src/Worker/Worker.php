@@ -675,14 +675,22 @@ final class Worker
             return JobResult::success();
         }
 
-        $class = $data['exceptionClass'] ?? RuntimeException::class;
-        $message = $data['exceptionMessage'] ?? 'Worker error';
-        if (!is_a($class, Throwable::class, true)) {
-            $class = RuntimeException::class;
+        $class = (string) ($data['exceptionClass'] ?? RuntimeException::class);
+        $message = (string) ($data['exceptionMessage'] ?? 'Worker error');
+
+        // A stand-in of the same class where one can be built from a message
+        // alone. A class this process cannot load, or whose constructor wants
+        // something else, degrades to a RuntimeException that keeps the
+        // class name in its message - throwing here would lose the job.
+        try {
+            if (is_a($class, Throwable::class, true)) {
+                return JobResult::failure(new $class($message));
+            }
+        } catch (Throwable) {
+            $message = "{$class}: {$message}";
         }
 
-        /** @var class-string<Throwable> $class */
-        return JobResult::failure(new $class($message));
+        return JobResult::failure(new RuntimeException($message));
     }
 
     /** @return array{success: bool, exceptionClass: class-string<Throwable>|null, exceptionMessage: ?string} */

@@ -64,6 +64,32 @@ final class WorkerTest extends TestCase
         $worker->shutdown();
     }
 
+    /**
+     * The parent rebuilds the handler's exception as `new $class($message)`.
+     * A domain exception whose constructor wants something else used to
+     * throw right there - inside collect(), after the delivery had been
+     * taken off the worker - so the dispatcher crashed and the job was lost.
+     */
+    public function testAFailureWhoseExceptionCannotBeRebuiltStillReportsItsMessage(): void
+    {
+        $worker = new Worker(1, static function (Job $job): void {
+            throw new ExceptionWithRequiredArguments('card declined', 402);
+        });
+        $worker->spawn();
+
+        $worker->assign(Deliveries::to($worker, Job::create(type: 'test')));
+        $outcome = $worker->collect(null);
+
+        $result = $outcome?->getResult();
+        $this->assertNotNull($result);
+        $this->assertFalse($result->isSuccess());
+        $this->assertInstanceOf(RuntimeException::class, $result->getException());
+        $this->assertStringContainsString('card declined', $result->getException()->getMessage());
+        $this->assertSame(WorkerState::IDLE, $worker->getState());
+
+        $worker->shutdown();
+    }
+
     public function testWorkerStartsWithNoTasksCounted(): void
     {
         $worker = new Worker(1, Handlers::succeeds());
@@ -388,5 +414,14 @@ final class WorkerTest extends TestCase
         }
 
         $this->assertTrue($exited, 'the worker process escaped instead of exiting');
+    }
+}
+
+/** A domain exception that cannot be built from a message alone. */
+final class ExceptionWithRequiredArguments extends RuntimeException
+{
+    public function __construct(string $reason, int $status)
+    {
+        parent::__construct("{$reason} ({$status})");
     }
 }
