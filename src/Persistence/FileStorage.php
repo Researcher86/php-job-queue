@@ -68,7 +68,8 @@ final readonly class FileStorage implements JobStorage
                     break;
                 }
 
-                throw new RuntimeException("Corrupt record on line {$index} of {$this->path}");
+                // +1: file() counts from zero, a human reading the log does not.
+                throw new RuntimeException(sprintf('Corrupt record on line %d of %s', $index + 1, $this->path));
             }
 
             /** @var array<string, mixed> $data */

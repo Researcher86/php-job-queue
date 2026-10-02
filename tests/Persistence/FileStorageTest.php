@@ -95,7 +95,8 @@ final class FileStorageTest extends TestCase
         $storage->store('job-2', ['state' => 'READY']);
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Corrupt record on line 1');
+        // The second line of the file - the first is job-1's record.
+        $this->expectExceptionMessage('Corrupt record on line 2 ');
 
         (new FileStorage($this->path))->load();
     }
