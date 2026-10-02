@@ -368,7 +368,7 @@ final class Worker
             throw new LogicException('Worker returned without an assigned job');
         }
 
-        $frame = $this->readFrame();
+        $frame = self::readFrame($this->stream);
 
         // No frame means EOF: the process died holding this job. The null
         // result is what tells the dispatcher the job was never
@@ -432,12 +432,6 @@ final class Worker
         return $this->state;
     }
 
-    /** The lease this worker is holding, if any. */
-    public function getCurrentDelivery(): ?Delivery
-    {
-        return $this->currentDelivery;
-    }
-
     public function getCurrentJob(): ?Job
     {
         return $this->currentDelivery?->getJob();
@@ -499,11 +493,6 @@ final class Worker
         }
     }
 
-    public function markDead(): void
-    {
-        $this->apply('die');
-    }
-
     /**
      * Closes our end of the socket and collects the process if it has
      * already gone. The polite half of shutdown(): a worker waiting for its
@@ -511,10 +500,8 @@ final class Worker
      */
     public function terminate(): void
     {
-        if (is_resource($this->stream)) {
-            fclose($this->stream);
-            $this->stream = null;
-        }
+        $this->closeStream();
+
         if ($this->pid > 0) {
             pcntl_waitpid($this->pid, $status, WNOHANG);
         }
@@ -545,10 +532,7 @@ final class Worker
      */
     public function shutdown(): void
     {
-        if (is_resource($this->stream)) {
-            fclose($this->stream);
-            $this->stream = null;
-        }
+        $this->closeStream();
 
         if ($this->pid <= 0) {
             return;
@@ -583,6 +567,15 @@ final class Worker
         }
     }
 
+    private function closeStream(): void
+    {
+        if (is_resource($this->stream)) {
+            fclose($this->stream);
+        }
+
+        $this->stream = null;
+    }
+
     /**
      * Polls waitpid until the process is gone or the budget runs out.
      * Returns whether it exited (and was reaped) in time.
@@ -615,22 +608,8 @@ final class Worker
      */
     private function workerLoop(mixed $stream): void
     {
-        while (true) {
-            $payload = self::readExact($stream, 4);
-            if ($payload === false) {
-                return;
-            }
-
-            $unpacked = unpack('N', $payload);
-            if ($unpacked === false || $unpacked[1] === 0) {
-                return;
-            }
-
-            $body = self::readExact($stream, $unpacked[1]);
-            if ($body === false) {
-                return;
-            }
-
+        // An empty frame is as good as EOF: there is no job in it.
+        while (($body = self::readFrame($stream)) !== null && $body !== '') {
             try {
                 $data = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
                 $job = Job::fromArray($data);
@@ -662,9 +641,6 @@ final class Worker
         }
     }
 
-    /**
-     * @param mixed $data
-     */
     private function decodeResult(mixed $data): JobResult
     {
         if (!is_array($data) || !isset($data['success'])) {
@@ -700,7 +676,7 @@ final class Worker
 
         return [
             'success' => $result->isSuccess(),
-            'exceptionClass' => $exception !== null ? get_class($exception) : null,
+            'exceptionClass' => $exception === null ? null : $exception::class,
             'exceptionMessage' => $exception?->getMessage(),
         ];
     }
@@ -719,26 +695,22 @@ final class Worker
     }
 
     /**
-     * One length-prefixed frame from the worker, or null on EOF.
+     * One length-prefixed frame, or null on EOF - from either end: the
+     * parent reads answers with it, the child reads jobs.
      *
      * Null is not an error here - it is how a crash is detected. See
      * writeAll() for the frame format.
      */
-    private function readFrame(): ?string
+    private static function readFrame(mixed $stream): ?string
     {
-        $header = self::readExact($this->stream, 4);
+        $header = self::readExact($stream, 4);
+        $length = $header === false ? false : unpack('N', $header);
 
-        if ($header === false) {
+        if ($length === false) {
             return null;
         }
 
-        $unpacked = unpack('N', $header);
-
-        if ($unpacked === false) {
-            return null;
-        }
-
-        $body = self::readExact($this->stream, $unpacked[1]);
+        $body = self::readExact($stream, $length[1]);
 
         return $body === false ? null : $body;
     }
@@ -746,11 +718,13 @@ final class Worker
     /**
      * stream_select()'s timeout, split the way it wants it: whole seconds
      * and microseconds, or [null] to block. Its own signature cannot take
-     * a float.
+     * a float. Shared with WorkerPool::poll(), which selects the same way.
+     *
+     * @internal
      *
      * @return array{0: ?int, 1?: int}
      */
-    private static function selectTimeout(?float $timeout): array
+    public static function selectTimeout(?float $timeout): array
     {
         if ($timeout === null) {
             return [null];
@@ -768,19 +742,14 @@ final class Worker
      */
     private static function writeAll(mixed $stream, string $data): void
     {
-        $length = strlen($data);
-        $header = pack('N', $length);
-
-        $total = 0;
-        $buffer = $header . $data;
+        $buffer = pack('N', strlen($data)) . $data;
         $bytes = strlen($buffer);
 
-        while ($total < $bytes) {
+        for ($total = 0; $total < $bytes; $total += $written) {
             $written = @fwrite($stream, substr($buffer, $total));
             if ($written === false || $written === 0) {
                 throw new RuntimeException('Failed to write to worker stream');
             }
-            $total += $written;
         }
     }
 

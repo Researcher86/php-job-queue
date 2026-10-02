@@ -56,13 +56,7 @@ final class WorkerPool
 
     public function getAvailableWorker(): ?Worker
     {
-        foreach ($this->workers as $worker) {
-            if ($worker->isAvailable()) {
-                return $worker;
-            }
-        }
-
-        return null;
+        return array_find($this->workers, static fn (Worker $worker): bool => $worker->isAvailable());
     }
 
     /**
@@ -72,15 +66,7 @@ final class WorkerPool
      */
     public function busyCount(): int
     {
-        $count = 0;
-
-        foreach ($this->workers as $worker) {
-            if ($worker->isWorking()) {
-                $count++;
-            }
-        }
-
-        return $count;
+        return count(array_filter($this->workers, static fn (Worker $worker): bool => $worker->isWorking()));
     }
 
     /**
@@ -163,7 +149,7 @@ final class WorkerPool
 
             $write = null;
             $except = null;
-            $ready = @stream_select($read, $write, $except, ...self::selectTimeout($timeout));
+            $ready = @stream_select($read, $write, $except, ...Worker::selectTimeout($timeout));
 
             if ($ready === false || $ready === 0) {
                 // Nothing yet. Only an indefinite wait goes round again;
@@ -176,13 +162,8 @@ final class WorkerPool
             }
 
             foreach ($read as $stream) {
-                $worker = $streamWorkers[(int) $stream] ?? null;
-                if ($worker === null) {
-                    continue;
-                }
-
                 // Already selected as readable, so this does not wait.
-                $outcome = $worker->collect(0.0);
+                $outcome = $streamWorkers[(int) $stream]->collect(0.0);
 
                 if ($outcome !== null) {
                     return $outcome;
@@ -193,23 +174,6 @@ final class WorkerPool
                 return null;
             }
         } while (true);
-    }
-
-    /**
-     * stream_select()'s timeout, split into seconds and microseconds, or
-     * [null] to block - see Worker::selectTimeout(), which this mirrors.
-     *
-     * @return array{0: ?int, 1?: int}
-     */
-    private static function selectTimeout(?float $timeout): array
-    {
-        if ($timeout === null) {
-            return [null];
-        }
-
-        $seconds = (int) $timeout;
-
-        return [$seconds, (int) (($timeout - $seconds) * 1_000_000)];
     }
 
     /** @return list<Worker> */
@@ -265,7 +229,7 @@ final class WorkerPool
             $replacement->spawn();
             $this->workers[$i] = $replacement;
             $replaced++;
-            $this->metrics?->increment('worker_crashes');
+            $this->metrics?->increment(MetricsCollector::WORKER_CRASHES);
         }
 
         return $replaced;
@@ -282,13 +246,7 @@ final class WorkerPool
 
     public function isDraining(): bool
     {
-        foreach ($this->workers as $worker) {
-            if (!$worker->isDraining() && !$worker->isDead()) {
-                return false;
-            }
-        }
-
-        return true;
+        return array_all($this->workers, static fn (Worker $worker): bool => $worker->isDraining() || $worker->isDead());
     }
 
     public function shutdown(): void
