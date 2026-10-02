@@ -23,12 +23,7 @@ enum JobPriority
     /** Rebuilds a case from the name toArray() wrote - see JobState::fromName(). */
     public static function fromName(string $name): self
     {
-        foreach (self::cases() as $case) {
-            if ($case->name === $name) {
-                return $case;
-            }
-        }
-
-        throw new ValueError(sprintf('"%s" is not a valid job priority', $name));
+        return array_find(self::cases(), static fn (self $case): bool => $case->name === $name)
+            ?? throw new ValueError(sprintf('"%s" is not a valid job priority', $name));
     }
 }

@@ -42,12 +42,7 @@ enum JobState
      */
     public static function fromName(string $name): self
     {
-        foreach (self::cases() as $case) {
-            if ($case->name === $name) {
-                return $case;
-            }
-        }
-
-        throw new ValueError(sprintf('"%s" is not a valid job state', $name));
+        return array_find(self::cases(), static fn (self $case): bool => $case->name === $name)
+            ?? throw new ValueError(sprintf('"%s" is not a valid job state', $name));
     }
 }

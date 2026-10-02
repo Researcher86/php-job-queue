@@ -114,30 +114,6 @@ final class Job
         ],
     ];
 
-    private JobState $state;
-
-    private int $attempts;
-
-    private ?float $availableAt;
-
-    /** When the CURRENT (most recent) attempt was dispatched to a worker -
-     *  provided it was dispatched with a time in hand, which JobDispatcher
-     *  always does. A no-argument markProcessing() leaves this exactly as it
-     *  was, so the field only ever describes the current attempt when callers
-     *  keep passing a time. */
-    private ?float $startedAt;
-
-    /** When the job last reached a terminal outcome - COMPLETED, or FAILED
-     *  for good. Not set by a retry: the job has not finished, it is going
-     *  around again. */
-    private ?float $completedAt;
-
-    /** The most recent failure's message, from whichever attempt reported
-     *  one last - a retry counts, since it is a failure too, just not the
-     *  final one. Never cleared by an attempt that reports no message of
-     *  its own. */
-    private ?string $lastError;
-
     /**
      * @param array<string, mixed> $payload
      */
@@ -149,19 +125,25 @@ final class Job
         private readonly float $createdAt,
         private readonly JobPriority $priority,
         private readonly ?string $idempotencyKey,
-        JobState $state,
-        int $attempts = 0,
-        ?float $availableAt = null,
-        ?float $startedAt = null,
-        ?float $completedAt = null,
-        ?string $lastError = null,
+        private JobState $state,
+        private int $attempts = 0,
+        private ?float $availableAt = null,
+        /** When the CURRENT (most recent) attempt was dispatched to a worker -
+         *  provided it was dispatched with a time in hand, which JobDispatcher
+         *  always does. A no-argument markProcessing() leaves this exactly as
+         *  it was, so the field only ever describes the current attempt when
+         *  callers keep passing a time. */
+        private ?float $startedAt = null,
+        /** When the job last reached a terminal outcome - COMPLETED, or FAILED
+         *  for good. Not set by a retry: the job has not finished, it is going
+         *  around again. */
+        private ?float $completedAt = null,
+        /** The most recent failure's message, from whichever attempt reported
+         *  one last - a retry counts, since it is a failure too, just not the
+         *  final one. Never cleared by an attempt that reports no message of
+         *  its own. */
+        private ?string $lastError = null,
     ) {
-        $this->state = $state;
-        $this->attempts = $attempts;
-        $this->availableAt = $availableAt;
-        $this->startedAt = $startedAt;
-        $this->completedAt = $completedAt;
-        $this->lastError = $lastError;
     }
 
     /**
@@ -171,12 +153,10 @@ final class Job
         string $type,
         array $payload = [],
         int $maxAttempts = 3,
-        ?Clock $clock = null,
+        Clock $clock = new SystemClock(),
         JobPriority $priority = JobPriority::NORMAL,
         ?string $idempotencyKey = null,
     ): self {
-        $clock ??= new SystemClock();
-
         return new self(
             id: JobId::generate(),
             type: $type,
