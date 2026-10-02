@@ -745,4 +745,21 @@ final class JobDispatcherTest extends TestCase
 
         $pool->shutdown();
     }
+
+    /**
+     * A deadline at exactly 0.0 is still a deadline. nextDeadline() used to
+     * drop the nulls with a bare array_filter(), which drops 0.0 too, and
+     * reported "nothing to wait for" - so a runtime on a clock that starts at
+     * zero would sleep through it.
+     */
+    public function testNextDeadlineKeepsADeadlineAtTimeZero(): void
+    {
+        $clock = new FakeClock(-10.0);
+        $queue = new InMemoryQueue($clock);
+        $queue->push(Job::create(type: 'later', clock: $clock), delay: 10);
+
+        $dispatcher = new JobDispatcher($queue, new WorkerPool(1, Handlers::succeeds()), clock: $clock);
+
+        $this->assertSame(0.0, $dispatcher->nextDeadline());
+    }
 }

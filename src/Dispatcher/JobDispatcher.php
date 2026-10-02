@@ -255,7 +255,10 @@ final class JobDispatcher
      */
     public function nextDeadline(): ?float
     {
-        $deadlines = array_filter([$this->queue->nextDeadline(), $this->monitor->nextDeadline()]);
+        $deadlines = array_filter(
+            [$this->queue->nextDeadline(), $this->monitor->nextDeadline()],
+            static fn (?float $deadline): bool => $deadline !== null,
+        );
 
         return $deadlines === [] ? null : min($deadlines);
     }
