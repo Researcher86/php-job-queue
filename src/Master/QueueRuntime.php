@@ -148,11 +148,6 @@ final class QueueRuntime
         return $this->running;
     }
 
-    public function isStopping(): bool
-    {
-        return $this->stopping;
-    }
-
     /**
      * How long this tick may wait: until the next deadline the runtime owns,
      * capped at $maxWait so signals stay responsive and work arriving from

@@ -80,11 +80,9 @@ final class JobDispatcher
         private readonly ?DeadLetterQueue $dlq = null,
         private readonly ?JobStorage $storage = null,
         private readonly ?MetricsCollector $metrics = null,
-        // Consulted before the attempts-remaining check, on a failure only
-        // (never on a worker vanishing - see handleFailure()). Null means
-        // every failure is eligible, same as before this parameter existed.
-        // Added last, and optional, so every positional construction already
-        // in this codebase keeps compiling unchanged.
+        // Consulted on a failure only, never on a worker vanishing - see
+        // handleFailure(). Last and optional so positional constructions
+        // keep working.
         private readonly ?Closure $shouldRetry = null,
     ) {
         $this->monitor = new VisibilityMonitor($visibilityTimeout, $clock);
@@ -236,14 +234,13 @@ final class JobDispatcher
      */
     public function requeueExpired(): int
     {
-        $count = 0;
+        $expired = $this->monitor->requeueExpired();
 
-        foreach ($this->monitor->requeueExpired() as $expired) {
-            $this->queue->push($expired);
-            $count++;
+        foreach ($expired as $job) {
+            $this->queue->push($job);
         }
 
-        return $count;
+        return count($expired);
     }
 
     /**
@@ -493,8 +490,13 @@ final class JobDispatcher
 
     private function handleFailure(Job $job, ?Throwable $exception): void
     {
+        // $shouldRetry is consulted on top of the attempts-remaining check, so
+        // a "this can never work" verdict goes straight to FAILED however
+        // much budget is left. No closure means every failure is eligible. A
+        // null exception never actually reaches here - JobResult::failure()
+        // always carries one - and is treated as eligible too.
         $eligible = $job->getAttempts() < $job->getMaxAttempts()
-            && $this->isRetryEligible($job, $exception);
+            && ($this->shouldRetry === null || $exception === null || ($this->shouldRetry)($job, $exception));
 
         if ($eligible) {
             $delay = $this->retryPolicy?->nextDelay($job) ?? 0;
@@ -514,24 +516,6 @@ final class JobDispatcher
             $this->dlq->add($job, $exception);
             $this->metrics?->increment(MetricsCollector::JOBS_DEAD_LETTERED);
         }
-    }
-
-    /**
-     * Whether this specific failure is even a candidate for another
-     * attempt - checked before the attempts-remaining count, so a "this can
-     * never work" verdict skips straight to markFailed() regardless of how
-     * much budget is left. Null $shouldRetry (the default) or a null
-     * $exception (defensive only - handleFailure() is reached exclusively
-     * from a JobResult::failure(), whose exception is never null) both mean
-     * "yes", the behavior before this method existed.
-     */
-    private function isRetryEligible(Job $job, ?Throwable $exception): bool
-    {
-        if ($this->shouldRetry === null || $exception === null) {
-            return true;
-        }
-
-        return ($this->shouldRetry)($job, $exception);
     }
 
     /**

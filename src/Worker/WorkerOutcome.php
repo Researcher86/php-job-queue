@@ -48,10 +48,4 @@ final readonly class WorkerOutcome
     {
         return $this->result;
     }
-
-    /** Whether the worker died rather than answering. */
-    public function isCrash(): bool
-    {
-        return $this->result === null;
-    }
 }
