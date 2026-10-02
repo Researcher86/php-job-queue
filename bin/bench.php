@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-use InvalidArgumentException;
 use PhpJobQueue\Dispatcher\JobDispatcher;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Metrics\MetricsCollector;
