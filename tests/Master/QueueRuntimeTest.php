@@ -81,6 +81,57 @@ final class QueueRuntimeTest extends TestCase
     }
 
     /**
+     * A SIGTERM that arrives while run() is still forking its workers - the
+     * window before the handler is installed - must be acted on as a
+     * graceful stop, not take the default action and kill the process.
+     *
+     * The window is as wide as forking the pool, so the runtime here runs
+     * in a child process with a large pool, and this process sends the
+     * SIGTERM the moment the child's first worker appears - while it is
+     * still forking the rest. Before the fix that killed the child outright
+     * nearly every time. After it, the outcome does not depend on the
+     * timing at all: wherever the signal lands, the child exits by itself,
+     * shut down. A child, so that a signal that is NOT handled kills it and
+     * not the suite.
+     */
+    public function testASigtermDuringStartupStopsTheRuntimeGracefully(): void
+    {
+        $pid = pcntl_fork();
+        $this->assertNotSame(-1, $pid, 'fork failed');
+
+        if ($pid === 0) {
+            $dispatcher = $this->dispatcher(Handlers::succeeds(), workers: 32);
+            $runtime = new QueueRuntime($dispatcher, $this->clock, maxWait: 0.001, shutdownGrace: 1.0);
+
+            $runtime->run();
+
+            exit($dispatcher->isAccepting() ? 2 : 0);
+        }
+
+        // Linux lists a process's children here; empty until the first fork.
+        $children = "/proc/{$pid}/task/{$pid}/children";
+        $deadline = microtime(true) + 5.0;
+        while (trim((string) @file_get_contents($children)) === '' && microtime(true) < $deadline) {
+            usleep(100);
+        }
+        posix_kill($pid, SIGTERM);
+
+        $deadline = microtime(true) + 10.0;
+        while (($reaped = pcntl_waitpid($pid, $status, WNOHANG)) === 0 && microtime(true) < $deadline) {
+            usleep(10_000);
+        }
+
+        if ($reaped === 0) {
+            posix_kill($pid, SIGKILL);
+            pcntl_waitpid($pid, $status);
+            $this->fail('the runtime never acted on the SIGTERM it received during startup');
+        }
+
+        $this->assertTrue(pcntl_wifexited($status), 'the runtime exited by itself, not by the signal');
+        $this->assertSame(0, pcntl_wexitstatus($status), 'stopped before ticking, and shut down');
+    }
+
+    /**
      * A stop requested before the loop starts is honoured rather than
      * cleared - otherwise a SIGTERM landing during startup would be lost.
      * The runtime still starts its workers and still shuts them down; it
@@ -106,7 +157,7 @@ final class QueueRuntimeTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 15, with a real signal: SIGTERM arrives while a worker
+     * Graceful shutdown, with a real signal: SIGTERM arrives while a worker
      * is mid-job, and the job still finishes.
      *
      * The handler signals its own parent - which is this process, running
@@ -131,7 +182,7 @@ final class QueueRuntimeTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 15's last step: the grace period runs out and the
+     * Graceful shutdown's last step: the grace period runs out and the
      * worker is killed mid-job. What this proves is that the job is left
      * RECOVERABLE - still PROCESSING, and still holding its lease, so
      * nothing has decided its fate.

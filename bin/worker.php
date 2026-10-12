@@ -16,7 +16,7 @@ use PhpJobQueue\Worker\WorkerPool;
 require __DIR__ . '/bootstrap.php';
 
 /**
- * The long-running queue process - PLAN.md Phase 15, runnable.
+ * The long-running queue process - README § The runtime, runnable.
  *
  *   make run-worker
  *

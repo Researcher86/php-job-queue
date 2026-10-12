@@ -10,7 +10,7 @@ use PhpJobQueue\Support\SystemClock;
 
 /**
  * The long-running process: the loop that keeps the queue moving, and the
- * one thing that knows how to stop - PLAN.md Phase 15.
+ * one thing that knows how to stop - README § The runtime.
  *
  * Everything it needs already exists; what was missing was something to
  * call it all on a schedule. JobDispatcher::drain() runs until the work
@@ -79,9 +79,13 @@ final class QueueRuntime
      * something asks it to stop. Returns once the shutdown has finished.
      *
      * A runtime is one-shot: run() does not clear a stop that was already
-     * requested, so a SIGTERM landing during startup cannot be lost, and a
-     * runtime that has stopped stays stopped. Starting again means building
-     * another one.
+     * requested - by stop(), or by a SIGTERM that arrived while the workers
+     * were being forked - and a runtime that has stopped stays stopped.
+     * Starting again means building another one.
+     *
+     * What a SIGTERM BEFORE run() does is not this class's to decide: no
+     * handler is installed yet, so it takes the default action and ends the
+     * process. From the first line of run() on, it is a graceful stop.
      */
     public function run(): void
     {
@@ -91,8 +95,29 @@ final class QueueRuntime
         // a worker that inherited this one would try to run a runtime
         // shutdown of its own. Worker::spawn() resets them in the child as
         // well, which covers the workers forked later as replacements.
-        $this->dispatcher->start();
-        $this->installSignalHandlers();
+        //
+        // But forking a pool takes a while, and for that whole while
+        // SIGTERM had its DEFAULT action - a signal landing there killed
+        // the process outright, workers orphaned, nothing shut down. So the
+        // two signals are blocked around startup rather than left
+        // unhandled: a blocked signal is not lost, the kernel holds it
+        // pending, and it is delivered the moment the mask is lifted - by
+        // which time the handler is there to receive it. Worker::spawn()
+        // unblocks them in each child, which inherits the mask.
+        pcntl_sigprocmask(SIG_BLOCK, [SIGTERM, SIGINT]);
+
+        try {
+            $this->dispatcher->start();
+            $this->installSignalHandlers();
+        } finally {
+            pcntl_sigprocmask(SIG_UNBLOCK, [SIGTERM, SIGINT]);
+        }
+
+        // Async signals are delivered at the engine's next check, not on the
+        // unblock itself. Dispatching here makes a signal that was held
+        // pending through startup set the flag before the loop's first
+        // look at it, so a stopped runtime never ticks.
+        pcntl_signal_dispatch();
 
         try {
             while (!$this->stopping) {

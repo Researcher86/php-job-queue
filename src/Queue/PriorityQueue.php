@@ -12,10 +12,10 @@ use PhpJobQueue\Support\SystemClock;
 use SplQueue;
 
 /**
- * One FIFO lane per priority - PLAN.md Phase 13.
+ * One FIFO lane per priority - README § Priority and starvation.
  *
  * The queue holds the lanes; a LaneSelector decides which one to serve
- * next. That split is the point of the phase: StrictPriority always takes
+ * next. That split is the point: StrictPriority always takes
  * the highest non-empty lane and can starve LOW forever, WeightedRoundRobin
  * gives each lane a share of the turns, and neither policy needs the queue
  * to know which one it is running.

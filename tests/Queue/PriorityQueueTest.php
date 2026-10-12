@@ -150,7 +150,7 @@ final class PriorityQueueTest extends TestCase
         $this->assertSame(5, array_search('low', $served, true));
     }
 
-    /** PLAN.md Phase 13's example order: 5 HIGH per 3 NORMAL per 1 LOW. */
+    /** WeightedRoundRobin's default order: 5 HIGH per 3 NORMAL per 1 LOW. */
     public function testWeightedRoundRobinFollowsItsWeights(): void
     {
         $queue = new PriorityQueue($this->clock, new WeightedRoundRobin());

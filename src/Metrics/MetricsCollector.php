@@ -7,7 +7,7 @@ namespace PhpJobQueue\Metrics;
 use InvalidArgumentException;
 
 /**
- * Counters and latency samples for the whole runtime - PLAN.md Phase 14.
+ * Counters and latency samples for the whole runtime - README § Metrics.
  *
  * Deliberately dumb: names are strings, counters only go up, and latencies
  * are kept as raw samples rather than pre-aggregated buckets. Nothing here

@@ -7,7 +7,7 @@ namespace PhpJobQueue\Job;
 use ValueError;
 
 /**
- * How urgent a job is - PLAN.md Phase 13.
+ * How urgent a job is - README § Priority and starvation.
  *
  * Declaration order IS priority order, highest first, and everything that
  * needs to walk the priorities in order walks JobPriority::cases(). There

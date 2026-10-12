@@ -116,7 +116,7 @@ rising, which is what a per-record cost against faster surroundings should
 look like.
 
 **Found by:** the profiling run at 1,000,000 jobs that the review suggested
-- not by reading the code. It had been there since Phase 2.
+- not by reading the code. It had been there since the first version of the queue.
 
 ---
 
@@ -156,6 +156,12 @@ in the DLQ, because the job was tried and did not work. A crash consumes
 nothing conclusive and puts the job straight back, because nothing reported
 anything about it. Encoding a crash as a failure would have made
 `maxAttempts` count worker deaths against a job that may be perfectly fine.
+
+**Revised by decision 22:** the delivery a crash ended had *already* counted
+— decision 4 — so "consumes nothing" was never true of the counter, only of
+the handling. What stays different is the handling: no retry delay, no
+`$shouldRetry`. What changed is that the budget is now checked on this path
+too.
 
 The outcome also carries the `Delivery` rather than the job, so the answer
 can be attributed to one specific handing-out — see decision 15.
@@ -346,6 +352,14 @@ than hidden.
 **Bug this fixed:** `load()` used `JSON_THROW_ON_ERROR` and died on the torn
 line — the docblock claimed crash tolerance the code did not have.
 
+**And the one after it:** dropping the torn line only in memory left it in
+the file with no newline after it, so the next append glued itself on — a
+corrupt line that was no longer last, and the restart after next refused to
+load. `load()` now truncates the torn tail, under an exclusive `flock` that
+`store()` also takes, so it can never cut into another process's append that
+is still in progress. Held by
+`FileStorageTest::testATornFinalRecordDoesNotCorruptTheRestartAfterNext`.
+
 ---
 
 ## 13. Every collaborator of the dispatcher is optional
@@ -534,6 +548,14 @@ Both are properties of the thing being charged, not something a queue can
 provide. What a queue can do is deliver at least once, say so, and leave the
 seam visible.
 
+**Revised:** the guard loaded its keys once, at construction, and after the
+fork every worker had a private copy — deduplication worked across restarts
+but not across workers in the same run. `isProcessed()` now re-reads the
+storage on a miss (a full `load()` of the log, the price of having no
+index). It needs a `FileStorage` to mean anything across processes, and its
+own one: `InMemoryQueue::restoreFromStorage()` refuses a log with guard
+records in it, with an error naming the cause.
+
 ---
 
 ## 20. Attempt metadata is scalar, current-attempt state - not a history
@@ -623,6 +645,36 @@ positionally throughout this project's own test suite
 times) - inserting a parameter between two already-positional ones would
 have silently broken every one of them. Appended at the end, none of them
 needed to change.
+
+---
+
+## 22. A lost delivery spends the budget too
+
+**Chosen:** every path that ends a delivery without an answer — the worker
+died holding the job, the worker was dead before the job could be written to
+it, the lease expired, or the whole process died with the job in flight —
+compares `attempts` to `maxAttempts`. Attempts left: back to READY at once,
+as before. Attempts spent: FAILED, logged, and into the DLQ with a
+`DeliveryLostException` (or the `WorkerDiedException` itself) as the cause.
+In the dispatcher that is `redeliverOrDeadLetter()`; on restart it is
+`InMemoryQueue::restoreFromStorage()`, which takes the DLQ as an optional
+argument.
+
+**Rejected:** routing these through `handleFailure()`. It would apply the
+retry delay and `$shouldRetry` to a job that did not fail, it was lost —
+there is no handler verdict to judge.
+
+**Why:** decision 4 made a delivery an attempt, and decision 12a made that
+count durable, but none of these paths ever looked at the count. So a job
+that killed its worker every time was requeued forever within a process,
+and handed back as READY with `3 of 3` used by every restart. The DLQ exists
+to end exactly that loop.
+
+**Held by:** `JobDispatcherTest::testAJobWhoseWorkerDiesEveryTimeIsDeadLetteredWhenItsAttemptsRunOut`,
+`testAJobWhoseLeaseKeepsExpiringIsDeadLetteredWhenItsAttemptsRunOut`, and
+`testAJobThatKeepsKillingItsWorkerStillReachesTheDlq` — which used to assert
+only that the third attempt had been counted, and that the job could still
+be popped.
 
 ---
 

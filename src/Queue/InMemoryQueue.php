@@ -4,20 +4,23 @@ declare(strict_types=1);
 
 namespace PhpJobQueue\Queue;
 
+use PhpJobQueue\Delivery\DeliveryLostException;
+use PhpJobQueue\DLQ\DeadLetterQueue;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Job\JobState;
 use PhpJobQueue\Persistence\JobStorage;
 use PhpJobQueue\Scheduler\DelayedJobScheduler;
 use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
+use RuntimeException;
 use SplQueue;
 
 /**
- * The FIFO queue from PLAN.md Phase 2, grown two things since:
+ * The plain FIFO queue, grown two things since:
  *
- *   - a DelayedJobScheduler for jobs that are not available yet (Phase 8);
+ *   - a DelayedJobScheduler for jobs that are not available yet (README § Delayed jobs);
  *   - an optional JobStorage, so the queue can be rebuilt after the queue
- *     process dies (Phase 12).
+ *     process dies (README § Persistence).
  *
  * Ready jobs are an SplQueue, not an array. That is not a style choice:
  * `array_shift()` reindexes the whole array, so it is O(n) per pop and
@@ -109,7 +112,7 @@ final class InMemoryQueue implements Queue
     }
 
     /**
-     * Rebuilds a queue from what storage remembers - PLAN.md Phase 12.
+     * Rebuilds a queue from what storage remembers - README § Persistence.
      *
      * PROCESSING is the interesting state. A job the log last saw as
      * PROCESSING was in a worker's hands when the process died, and nobody
@@ -117,17 +120,51 @@ final class InMemoryQueue implements Queue
      * the at-least-once bargain restated at the persistence layer: the same
      * job may execute twice, and handlers must be idempotent.
      *
+     * Unless that lost delivery was its last. A job whose attempts are
+     * already spent is not handed out again - it is marked FAILED, the log
+     * is told so, and it goes to $dlq if one is given. This is the restart
+     * counterpart of JobDispatcher::redeliverOrDeadLetter(): without it a
+     * job that kills the whole process every time came back from every
+     * restart, over its budget, forever.
+     *
      * COMPLETED and FAILED are terminal and are simply not restored - a
      * finished job is not work.
+     *
+     * Every record has to be a job. A storage shared with an
+     * IdempotencyGuard holds its keys too, and those are refused with an
+     * error naming the cause, rather than half-parsed into a job.
      */
-    public static function restoreFromStorage(JobStorage $storage, Clock $clock = new SystemClock()): self
-    {
+    public static function restoreFromStorage(
+        JobStorage $storage,
+        Clock $clock = new SystemClock(),
+        ?DeadLetterQueue $dlq = null,
+    ): self {
         $queue = new self($clock, $storage);
 
-        foreach ($storage->load() as $data) {
+        foreach ($storage->load() as $key => $data) {
+            if (!isset($data['id'], $data['state'])) {
+                throw new RuntimeException(sprintf(
+                    'Record "%s" in the job storage is not a job. Is the storage shared with an '
+                    . 'IdempotencyGuard? Give the guard a storage of its own.',
+                    $key,
+                ));
+            }
+
             $job = Job::fromArray($data);
 
             if ($job->getState() === JobState::PROCESSING) {
+                if ($job->getAttempts() >= $job->getMaxAttempts()) {
+                    $reason = new DeliveryLostException('The process died while the job was in flight.');
+                    $job->markFailed($clock->now(), $reason->getMessage());
+                    // A state change, so unlike everything else restored
+                    // here it IS logged: the next restart must not find
+                    // the job PROCESSING and decide this all over again.
+                    $queue->persist($job);
+                    $dlq?->add($job, $reason);
+
+                    continue;
+                }
+
                 $job->markRetry($clock->now());
             }
 

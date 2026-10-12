@@ -11,7 +11,7 @@ use PhpJobQueue\Support\SystemClock;
 
 /**
  * Holds the lease on every job that is in a worker's hands, and takes back
- * the ones nobody ever acknowledged - PLAN.md Phase 9.
+ * the ones nobody ever acknowledged - README § Visibility timeout.
  *
  * A worker that dies mid-job cannot report anything. Without this, the job
  * it was holding is simply gone: not in the queue, not completed, not
@@ -52,7 +52,7 @@ use PhpJobQueue\Support\SystemClock;
  * handler may run. A handler that takes longer than the visibility timeout
  * gets its job handed to a second worker while the first is still working
  * on it - that is the timeout being too short, not the handler misbehaving.
- * See PLAN.md's engineering question 2.
+ * See README § Engineering questions, answered.
  */
 final class VisibilityMonitor
 {
@@ -150,11 +150,12 @@ final class VisibilityMonitor
 
     /**
      * Every job whose ACK is overdue, moved back to READY and stripped of
-     * its lease. The caller returns them to a queue - see
-     * JobDispatcher::requeueExpired().
+     * its lease. The caller returns them to a queue.
      *
-     * Dropping the lease here is what makes the old worker's eventual
-     * answer stale rather than authoritative.
+     * Unconditionally READY, whatever attempts the job has left - which is
+     * right for a caller that only wants the lease mechanics, and wrong for
+     * the dispatcher, which has a budget to enforce. That one uses
+     * takeExpired() and decides for itself.
      *
      * @return list<Job>
      */
@@ -162,11 +163,34 @@ final class VisibilityMonitor
     {
         $now ??= $this->clock->now();
 
+        $expired = $this->takeExpired($now);
+
+        foreach ($expired as $job) {
+            $job->markRetry($now);
+        }
+
+        return $expired;
+    }
+
+    /**
+     * Every job whose ACK is overdue, stripped of its lease but left
+     * PROCESSING: what happens to it next - another delivery, or the DLQ
+     * once its attempts are spent - is the caller's decision. See
+     * JobDispatcher::requeueExpired().
+     *
+     * Dropping the lease here is what makes the old worker's eventual
+     * answer stale rather than authoritative.
+     *
+     * @return list<Job>
+     */
+    public function takeExpired(?float $now = null): array
+    {
+        $now ??= $this->clock->now();
+
         $expired = [];
 
         foreach ($this->current as $id => $delivery) {
             if ($delivery->isOverdue($now)) {
-                $delivery->getJob()->markRetry($now);
                 $expired[] = $delivery->getJob();
                 unset($this->current[$id]);
             }

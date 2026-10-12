@@ -9,9 +9,9 @@ use PhpJobQueue\Job\JobPriority;
 
 /**
  * Serves the lanes in rounds, each lane getting as many turns per round as
- * its weight - PLAN.md Phase 13's answer to starvation.
+ * its weight - the answer to starvation in README § Priority and starvation.
  *
- * With the plan's example weights (HIGH 5, NORMAL 3, LOW 1) and all three
+ * With the default weights (HIGH 5, NORMAL 3, LOW 1) and all three
  * lanes busy, the order is:
  *
  *   H H H H H  N N N  L   H H H H H  N N N  L   ...
@@ -45,7 +45,7 @@ final class WeightedRoundRobin implements LaneSelector
     private array $credits;
 
     /**
-     * Defaults to PLAN.md Phase 13's example: 5 HIGH per 3 NORMAL per 1 LOW.
+     * Defaults to 5 HIGH per 3 NORMAL per 1 LOW.
      */
     public function __construct(
         int $high = 5,

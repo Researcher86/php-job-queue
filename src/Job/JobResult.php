@@ -7,7 +7,7 @@ namespace PhpJobQueue\Job;
 use Throwable;
 
 /**
- * What a handler decided: ACK or NACK - PLAN.md Phase 6.
+ * What a handler decided: ACK or NACK - README § ACK and NACK.
  *
  * Constructed only through success() and failure(), so a failure always
  * carries its exception. "It failed" without a reason is not a state the

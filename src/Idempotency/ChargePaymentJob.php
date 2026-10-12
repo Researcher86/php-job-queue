@@ -11,7 +11,7 @@ use RuntimeException;
 
 /**
  * A handler that deduplicates its own side effect - the worked example for
- * PLAN.md's engineering question 5.
+ * README § At-least-once, and what it costs you.
  *
  * A payment may legally be charged once, and an at-least-once queue will
  * sometimes deliver the same operation twice: a worker that crashed after

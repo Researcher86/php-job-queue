@@ -11,7 +11,7 @@ use PhpJobQueue\Support\Clock;
 use PhpJobQueue\Support\SystemClock;
 
 /**
- * The one place new jobs are born - PLAN.md Phase 3.
+ * The one place new jobs are born - README § Producing work.
  *
  * It exists so that the clock and the metrics counter are decided once, at
  * wiring time, rather than at every call site that wants a job. It is also

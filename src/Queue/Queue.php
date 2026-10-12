@@ -7,7 +7,7 @@ namespace PhpJobQueue\Queue;
 use PhpJobQueue\Job\Job;
 
 /**
- * Where jobs wait - PLAN.md Phase 2.
+ * Where jobs wait - README § Queues.
  *
  * Two implementations: InMemoryQueue (one FIFO) and PriorityQueue (one FIFO
  * per priority, plus a LaneSelector to choose between them). Both hold

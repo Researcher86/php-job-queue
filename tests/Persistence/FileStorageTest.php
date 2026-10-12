@@ -87,6 +87,31 @@ final class FileStorageTest extends TestCase
         $this->assertSame(['job-1', 'job-2'], array_keys($loaded));
     }
 
+    /**
+     * Dropping the torn record is not enough on its own: the next append
+     * would land on the end of it, turning the torn tail into a corrupt
+     * MIDDLE line - and the restart after next would refuse to start.
+     *
+     * So two restarts, with work logged in between: the first must repair
+     * the tail, not just skip it.
+     */
+    public function testATornFinalRecordDoesNotCorruptTheRestartAfterNext(): void
+    {
+        $storage = new FileStorage($this->path);
+        $storage->store('job-1', ['state' => 'READY']);
+        file_put_contents($this->path, '{"key":"job-2","da', FILE_APPEND);
+
+        // Restart 1: reads the log, then carries on writing to it.
+        $afterFirstRestart = new FileStorage($this->path);
+        $this->assertSame(['job-1'], array_keys($afterFirstRestart->load()));
+        $afterFirstRestart->store('job-3', ['state' => 'READY']);
+
+        // Restart 2: the log is whole again.
+        $loaded = (new FileStorage($this->path))->load();
+
+        $this->assertSame(['job-1', 'job-3'], array_keys($loaded));
+    }
+
     public function testCorruptionEarlierInTheLogIsNotHiddenAway(): void
     {
         $storage = new FileStorage($this->path);

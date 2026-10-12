@@ -7,7 +7,7 @@ namespace PhpJobQueue\Job;
 use ValueError;
 
 /**
- * Where a job is in its lifecycle - PLAN.md Phase 1. The transitions
+ * Where a job is in its lifecycle - README § A job's life. The transitions
  * between these live in Job::TRANSITIONS, which is the only thing allowed
  * to move a job from one to another.
  */

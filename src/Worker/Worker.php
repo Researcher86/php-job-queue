@@ -127,6 +127,18 @@ final class Worker
     private const int EXIT_POLL_INTERVAL_US = 1_000;
 
     /**
+     * The longest frame readFrame() will accept, in bytes: 16 MiB.
+     *
+     * The length prefix decides how much is read, so without a cap it is
+     * whatever four bytes say - and four bytes of garbage say up to 4 GiB,
+     * which fread() tries to allocate before reading any of it. A job is a
+     * JSON payload and an answer is a class name and a message; neither
+     * has any business near this size, so a prefix past it is a stream
+     * that has lost its framing, not a big message.
+     */
+    public const int MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+    /**
      * Every socket end this process still holds, across all workers - so a
      * newly forked child can close the ones that belong to its siblings.
      *
@@ -217,6 +229,11 @@ final class Worker
             // leaves when its socket closes.
             pcntl_signal(SIGTERM, SIG_DFL);
             pcntl_signal(SIGINT, SIG_DFL);
+
+            // And the signal mask, which a fork inherits too: QueueRuntime
+            // blocks both while it forks the pool. A worker left with them
+            // blocked would sit out every SIGTERM sent to it.
+            pcntl_sigprocmask(SIG_UNBLOCK, [SIGTERM, SIGINT]);
 
             // The pipes belonging to workers forked before this one - see
             // $allStreams.
@@ -331,8 +348,8 @@ final class Worker
     }
 
     /**
-     * Reads the worker's answer, if it has one - PLAN.md Phase 6's ACK and
-     * NACK, arriving on the socket.
+     * Reads the worker's answer, if it has one - the ACK or
+     * NACK of README § ACK and NACK, arriving on the socket.
      *
      * $timeout is in seconds: 0.0 polls, null waits indefinitely, anything
      * else waits at most that long. Returns null if nothing arrived in
@@ -473,7 +490,7 @@ final class Worker
     }
 
     /**
-     * Takes the worker out of rotation - PLAN.md Phase 15.
+     * Takes the worker out of rotation - README § Graceful shutdown.
      *
      * A worker holding a job becomes DRAINING and is left completely alone:
      * it finishes, and its answer is applied exactly as it would have been.
@@ -508,7 +525,7 @@ final class Worker
     }
 
     /**
-     * Ends the process for good - PLAN.md Phase 15's last step.
+     * Ends the process for good - the last step of a graceful shutdown.
      *
      * Closing the socket is the polite request: a worker waiting for its
      * next job reads EOF and returns from its loop on its own, which is
@@ -700,14 +717,31 @@ final class Worker
      *
      * Null is not an error here - it is how a crash is detected. See
      * writeAll() for the frame format.
+     *
+     * A prefix longer than MAX_FRAME_BYTES IS an error, and throws: the
+     * stream is out of step and nothing after it can be trusted. In the
+     * child that ends the worker (spawn() turns it into exit(1)), which the
+     * parent sees as the EOF of a crash; in the parent it propagates out of
+     * collect(), because a worker answering garbage is a bug to see, not a
+     * condition to recover from.
+     *
+     * @internal public only so the cap can be tested without a process
      */
-    private static function readFrame(mixed $stream): ?string
+    public static function readFrame(mixed $stream): ?string
     {
         $header = self::readExact($stream, 4);
         $length = $header === false ? false : unpack('N', $header);
 
         if ($length === false) {
             return null;
+        }
+
+        if ($length[1] > self::MAX_FRAME_BYTES) {
+            throw new RuntimeException(sprintf(
+                'Frame length %d exceeds the %d-byte maximum - the stream has lost its framing',
+                $length[1],
+                self::MAX_FRAME_BYTES,
+            ));
         }
 
         $body = self::readExact($stream, $length[1]);

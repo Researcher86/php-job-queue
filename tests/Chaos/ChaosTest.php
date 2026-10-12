@@ -50,7 +50,7 @@ final class ChaosTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 11: "Kill worker while idle".
+     * Kill a worker while it is idle - README § Worker crashes.
      *
      * Nobody is selecting on an idle worker's socket, so this death is
      * invisible until something goes looking - which is what maintain()
@@ -86,7 +86,7 @@ final class ChaosTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 11, the same kill through the dispatcher: an idle
+     * The same idle kill, through the dispatcher: an idle
      * worker dies, and the job dispatched to it is not lost - not to the
      * crash, and not to an exception escaping the dispatch loop either.
      */
@@ -167,13 +167,13 @@ final class ChaosTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 16's slow job, and the thing it actually breaks: a
+     * The slow job, and the thing it actually breaks: a
      * handler that takes longer than the visibility timeout gets its job
      * handed to a SECOND worker while the first is still working on it.
      *
      * That is not the handler misbehaving, it is the timeout being too
-     * short - see PLAN.md's engineering question 2, request timeout versus
-     * visibility timeout. And the consequence is a duplicate execution
+     * short - see README § Engineering questions, answered: request timeout
+     * versus visibility timeout. And the consequence is a duplicate execution
      * with nothing crashed and nothing failing, which is the version of
      * at-least-once delivery that surprises people.
      */

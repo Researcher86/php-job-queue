@@ -25,9 +25,9 @@
     },
     "scripts": {
         "test": "phpunit",
-        "analyse": "phpstan analyse",
-        "format": "php-cs-fixer fix",
-        "format:check": "php-cs-fixer check --diff"
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "format": "php-cs-fixer fix --diff",
+        "format:check": "php-cs-fixer fix --diff --dry-run"
     },
     "config": {
         "sort-packages": true

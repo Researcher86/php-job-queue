@@ -6,6 +6,7 @@ namespace PhpJobQueue\Dispatcher;
 
 use Closure;
 use PhpJobQueue\Delivery\Delivery;
+use PhpJobQueue\Delivery\DeliveryLostException;
 use PhpJobQueue\DLQ\DeadLetterQueue;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Metrics\MetricsCollector;
@@ -24,7 +25,7 @@ use Throwable;
 
 /**
  * The middle of the system: takes jobs off a queue, gives them to free
- * workers, and decides what each answer means - PLAN.md Phases 5 to 7.
+ * workers, and decides what each answer means - README § The dispatcher.
  *
  * Everything else in the project is a piece this one holds together, and
  * all of them are optional. Given only a queue and a pool it dispatches
@@ -50,10 +51,15 @@ use Throwable;
  *   result is success        -> ACK  -> COMPLETED
  *   result is failure, tries -> NACK -> READY, after the retry delay
  *   result is failure, done  -> NACK -> FAILED, and a DLQ record
- *   result is NULL           -> the worker died holding the job, so it
+ *   result is NULL, tries    -> the worker died holding the job, so it
  *                               goes straight back to READY and the worker
- *                               is replaced. Not a failed attempt: nothing
- *                               reported anything.
+ *                               is replaced. No retry delay and no
+ *                               $shouldRetry: nothing reported a failure.
+ *   result is NULL, done     -> FAILED and a DLQ record all the same. The
+ *                               delivery still counted, and a job that
+ *                               kills every worker it touches must not
+ *                               cycle forever. An expired lease is
+ *                               settled the same way.
  *   the job is not PROCESSING -> a late answer for a job already resolved,
  *                               counted as a stale ACK and ignored
  *
@@ -225,8 +231,12 @@ final class JobDispatcher
     }
 
     /**
-     * Returns every job whose ACK went overdue to the queue, and reports
-     * how many - PLAN.md Phase 9.
+     * Reclaims every job whose ACK went overdue, and reports how many -
+     * see VisibilityMonitor.
+     *
+     * Reclaimed means another delivery if the job has attempts left, and
+     * the DLQ if it has not - see redeliverOrDeadLetter(). Both count: the
+     * number is leases taken back, not jobs requeued.
      *
      * Nothing calls this on a timer by itself: QueueRuntime calls it once
      * per tick, and a test calls it when it wants to ask "what would the
@@ -234,10 +244,13 @@ final class JobDispatcher
      */
     public function requeueExpired(): int
     {
-        $expired = $this->monitor->requeueExpired();
+        $expired = $this->monitor->takeExpired();
 
         foreach ($expired as $job) {
-            $this->queue->push($job);
+            $this->redeliverOrDeadLetter(
+                $job,
+                new DeliveryLostException('Visibility timeout expired before the job was acknowledged.'),
+            );
         }
 
         return count($expired);
@@ -278,7 +291,7 @@ final class JobDispatcher
     }
 
     /**
-     * A gauge reading of the whole system, right now - PLAN.md Phase 14.
+     * A gauge reading of the whole system, right now - README § Metrics.
      *
      * Read from the live objects rather than accumulated as events, because
      * a gauge that is maintained by hand drifts: every push, pop, crash and
@@ -303,7 +316,7 @@ final class JobDispatcher
     }
 
     /**
-     * Graceful shutdown - PLAN.md Phase 15.
+     * Graceful shutdown - README § Graceful shutdown.
      *
      *   stop accepting  ->  stop dispatching  ->  let workers finish
      *   ->  apply their results  ->  tear the pool down
@@ -360,7 +373,7 @@ final class JobDispatcher
     /**
      * Hands one job to one worker, and returns whether it got there.
      *
-     * The order matters and is the invariant of PLAN.md Phase 5: the job is
+     * The order matters and is README § The invariant: the job is
      * marked PROCESSING, leased from the visibility monitor, and written to
      * storage BEFORE it goes to the socket - so there is no instant at
      * which the job is neither in the queue nor accounted for as in flight,
@@ -376,6 +389,8 @@ final class JobDispatcher
      * back: an attempt in this system counts a DELIVERY, not a successful
      * run, which is the same accounting the visibility timeout uses when it
      * requeues a job whose worker vanished. Real queues count receipts too.
+     * So if that was its last attempt, it goes to the DLQ instead - see
+     * redeliverOrDeadLetter().
      */
     private function dispatch(Worker $worker, Job $job): bool
     {
@@ -414,10 +429,9 @@ final class JobDispatcher
 
         try {
             $worker->assign($delivery);
-        } catch (WorkerDiedException) {
+        } catch (WorkerDiedException $e) {
             $this->monitor->release($delivery);
-            $job->markRetry($this->clock->now(), 'Worker died before the job could be assigned.');
-            $this->queue->push($job);
+            $this->redeliverOrDeadLetter($job, $e);
             $this->workerPool->maintain();
 
             return false;
@@ -463,8 +477,7 @@ final class JobDispatcher
         $this->monitor->release($delivery);
 
         if ($result === null) {
-            $job->markRetry($this->clock->now(), 'Worker died while holding the job.');
-            $this->queue->push($job);
+            $this->redeliverOrDeadLetter($job, new DeliveryLostException('Worker died while holding the job.'));
             $this->workerPool->replaceDeadWorkers();
             return;
         }
@@ -509,6 +522,41 @@ final class JobDispatcher
             return;
         }
 
+        $this->deadLetter($job, $exception);
+    }
+
+    /**
+     * A delivery that ended with NO answer - the worker died holding the
+     * job, died before it could take it, or let its lease expire - goes
+     * back for another delivery if the job has attempts left, and to the
+     * DLQ if it has not.
+     *
+     * The budget check is the whole point. These paths used to requeue
+     * unconditionally, on the reasoning that nothing had reported a
+     * failure - but an attempt counts a delivery, and these deliveries
+     * were spent. A job that kills its worker every time therefore cycled
+     * forever, consuming a fresh process per round, and never reached the
+     * DLQ that exists to stop exactly that.
+     *
+     * Deliberately NOT handleFailure(): there is no handler verdict for
+     * $shouldRetry to judge, and an immediate redelivery rather than a
+     * backoff delay is what these paths have always done - the job did not
+     * fail, it was lost.
+     */
+    private function redeliverOrDeadLetter(Job $job, Throwable $reason): void
+    {
+        if ($job->getAttempts() < $job->getMaxAttempts()) {
+            $job->markRetry($this->clock->now(), $reason->getMessage());
+            $this->queue->push($job);
+            return;
+        }
+
+        $this->deadLetter($job, $reason);
+    }
+
+    /** PROCESSING -> FAILED for good, logged, counted, and into the DLQ. */
+    private function deadLetter(Job $job, ?Throwable $exception): void
+    {
         $job->markFailed($this->clock->now(), $exception?->getMessage());
         $this->persist($job);
         $this->metrics?->increment(MetricsCollector::JOBS_FAILED);

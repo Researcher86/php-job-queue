@@ -7,7 +7,7 @@ namespace PhpJobQueue\Queue;
 use PhpJobQueue\Job\JobPriority;
 
 /**
- * Decides which priority lane PriorityQueue serves next - PLAN.md Phase 13.
+ * Decides which priority lane PriorityQueue serves next - README § Priority and starvation.
  *
  * Pulled out into its own object for the same reason RetryPolicy is one:
  * the queue's job is to hold jobs in lanes, and the policy question ("does

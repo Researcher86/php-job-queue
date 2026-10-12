@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace PhpJobQueue\Persistence;
 
 /**
- * Somewhere a job's last known state can survive the process - PLAN.md
- * Phase 12.
+ * Somewhere a job's last known state can survive the process - README
+ * § Persistence.
  *
  * Deliberately tiny: store() by key, load() everything. It is an
  * append-only log keyed by job id, where the last write for a key wins, and

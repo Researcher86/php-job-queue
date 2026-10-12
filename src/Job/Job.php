@@ -290,7 +290,7 @@ final class Job
         $this->availableAt = $now;
     }
 
-    /** Not available until $availableAt - PLAN.md Phase 8. */
+    /** Not available until $availableAt - README § Delayed jobs. */
     public function markDelayed(float $availableAt): void
     {
         $this->apply('delay');
@@ -363,7 +363,7 @@ final class Job
 
     /**
      * Back to READY from the dead letter queue, because somebody decided to
-     * try again - PLAN.md Phase 10. Not to be confused with markRetry().
+     * try again - README § Dead letter queue. Not to be confused with markRetry().
      */
     public function markRequeued(float $availableAt): void
     {

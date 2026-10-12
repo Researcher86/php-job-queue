@@ -478,6 +478,11 @@ final class JobDispatcherTest extends TestCase
      * its worker every time still runs out of attempts. Without durable
      * attempts each restart handed it a fresh allowance and it would run
      * forever.
+     *
+     * Counting the attempts is only half of it. The restore that finds the
+     * third delivery lost has to act on the count - it used to hand the job
+     * back as READY with 3 of 3 used, and the next process ran it a fourth
+     * time, and a fifth, and never dead-lettered it.
      */
     public function testAJobThatKeepsKillingItsWorkerStillReachesTheDlq(): void
     {
@@ -488,6 +493,7 @@ final class JobDispatcherTest extends TestCase
 
         $job = Job::create(type: 'kills-workers', maxAttempts: 3, clock: $clock);
         $queue->push($job);
+        $id = $job->getId()->toString();
 
         // Three separate "processes", each dispatching once and then dying.
         for ($restart = 0; $restart < 3; $restart++) {
@@ -507,14 +513,101 @@ final class JobDispatcherTest extends TestCase
             // The process dies here - no answer, no ACK - and the next one
             // rebuilds the queue from the log.
             $pool->shutdown();
-            $queue = InMemoryQueue::restoreFromStorage($storage, $clock);
+            $queue = InMemoryQueue::restoreFromStorage($storage, $clock, $dlq);
         }
 
-        // Three deliveries used up. The fourth attempt is not allowed.
-        $recovered = $queue->pop();
-        $this->assertNotNull($recovered);
-        $this->assertSame(3, $recovered->getAttempts(), 'all three deliveries counted');
-        $this->assertSame(3, $recovered->getMaxAttempts());
+        // Three deliveries used up. The fourth attempt is not allowed: the
+        // job is not handed out again, it is dead-lettered.
+        $this->assertNull($queue->pop(), 'not offered a fourth delivery');
+        $this->assertSame(0, $queue->size());
+
+        $record = $dlq->find($id);
+        $this->assertNotNull($record, 'dead-lettered');
+        $this->assertSame(JobState::FAILED, $record->getJob()->getState());
+        $this->assertSame(3, $record->getAttempts(), 'all three deliveries counted');
+
+        // And the log says so, so the restart after this one does not bring
+        // it back either.
+        $this->assertSame('FAILED', $storage->load()[$id]['state']);
+        $this->assertSame(0, InMemoryQueue::restoreFromStorage($storage, $clock)->size());
+    }
+
+    /**
+     * The same job within one process: the worker dies holding it every
+     * time. That used to go straight back to READY with no budget check, so
+     * a poison job recycled workers forever - drain() would never return.
+     * A bounded loop of dispatchNext() keeps a regression from hanging the
+     * suite.
+     */
+    public function testAJobWhoseWorkerDiesEveryTimeIsDeadLetteredWhenItsAttemptsRunOut(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $dlq = new DeadLetterQueue($clock);
+        $pool = new WorkerPool(1, static function (Job $job): void {
+            posix_kill(getmypid(), SIGKILL);
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'poison', maxAttempts: 2, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, new FixedDelayRetry(0), $clock, dlq: $dlq);
+
+        for ($i = 0; $i < 5 && $job->getState() !== JobState::FAILED; $i++) {
+            $dispatcher->dispatchNext();
+        }
+
+        $this->assertSame(JobState::FAILED, $job->getState());
+        $this->assertSame(2, $job->getAttempts(), 'no third delivery');
+        $this->assertSame(0, $queue->size());
+        $record = $dlq->find($job->getId()->toString());
+        $this->assertNotNull($record);
+        $this->assertStringContainsString('died', $record->getException()->getMessage());
+
+        $pool->shutdown();
+    }
+
+    /**
+     * And through the visibility timeout: a job whose lease runs out on
+     * every delivery is reclaimed until its attempts are spent, then
+     * dead-lettered instead of handed out a third time.
+     */
+    public function testAJobWhoseLeaseKeepsExpiringIsDeadLetteredWhenItsAttemptsRunOut(): void
+    {
+        $clock = new FakeClock(1000.0);
+        $queue = new InMemoryQueue($clock);
+        $dlq = new DeadLetterQueue($clock);
+        $pool = new WorkerPool(2, static function (Job $job): void {
+            usleep(100_000);
+        });
+        $pool->start();
+
+        $job = Job::create(type: 'too-slow', maxAttempts: 2, clock: $clock);
+        $queue->push($job);
+
+        $dispatcher = new JobDispatcher($queue, $pool, clock: $clock, visibilityTimeout: 1, dlq: $dlq);
+
+        $this->assertSame(1, $dispatcher->dispatchPending(), 'delivery 1');
+        $clock->advance(2.0);
+        $this->assertSame(1, $dispatcher->requeueExpired());
+        $this->assertSame(JobState::READY, $job->getState(), 'one attempt left, so it goes back');
+
+        $this->assertSame(1, $dispatcher->dispatchPending(), 'delivery 2');
+        $clock->advance(2.0);
+        $this->assertSame(1, $dispatcher->requeueExpired());
+
+        $this->assertSame(JobState::FAILED, $job->getState());
+        $this->assertSame(0, $queue->size(), 'not queued for a third delivery');
+        $this->assertFalse($dispatcher->isProcessing($job));
+        $record = $dlq->find($job->getId()->toString());
+        $this->assertNotNull($record);
+        $this->assertStringContainsString('Visibility timeout', $record->getException()->getMessage());
+
+        // Both late answers arrive for leases nobody holds any more, and
+        // change nothing.
+        $dispatcher->shutdown(2.0);
+        $this->assertSame(JobState::FAILED, $job->getState());
     }
 
     public function testCompletedJobIsNotRestoredAfterRestart(): void

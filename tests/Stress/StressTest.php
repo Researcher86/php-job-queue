@@ -39,7 +39,7 @@ final class StressTest extends TestCase
     }
 
     /**
-     * PLAN.md Phase 16 asks for 10,000 as well. It runs in about half a
+     * And 10,000. It runs in about half a
      * second, so it stays in the suite; 100,000 is bin/bench.php's job -
      * it takes eight seconds and 96MB, which is a measurement, not a test.
      *

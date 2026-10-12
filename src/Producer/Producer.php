@@ -9,7 +9,7 @@ use PhpJobQueue\Job\JobPriority;
 use PhpJobQueue\Queue\Queue;
 
 /**
- * The application's way in - PLAN.md Phase 3.
+ * The application's way in - README § Producing work.
  *
  * A one-line seam: dispatch a type and a payload, and the job is created
  * and queued. Application code that uses this never touches a Job object, a

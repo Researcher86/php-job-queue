@@ -415,6 +415,46 @@ final class WorkerTest extends TestCase
 
         $this->assertTrue($exited, 'the worker process escaped instead of exiting');
     }
+
+    /**
+     * The length prefix is trusted to size a read, so a prefix that is
+     * garbage - a desynchronised stream, a stray write - must not be taken
+     * at its word. 0xFFFFFFFF would ask fread() for 4 GiB; the cap refuses
+     * it before a single byte of body is read.
+     */
+    public function testAFrameLongerThanTheCapIsRefused(): void
+    {
+        foreach ([Worker::MAX_FRAME_BYTES + 1, 0xFFFFFFFF] as $length) {
+            $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            $this->assertNotFalse($pair);
+            [$writer, $reader] = $pair;
+
+            fwrite($writer, pack('N', $length));
+            fclose($writer);
+
+            try {
+                Worker::readFrame($reader);
+                $this->fail("a {$length}-byte frame was accepted");
+            } catch (RuntimeException $e) {
+                $this->assertStringContainsString('exceeds', $e->getMessage());
+            } finally {
+                fclose($reader);
+            }
+        }
+    }
+
+    public function testAFrameWithinTheCapIsStillRead(): void
+    {
+        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $this->assertNotFalse($pair);
+        [$writer, $reader] = $pair;
+
+        fwrite($writer, pack('N', 5) . 'hello');
+        fclose($writer);
+
+        $this->assertSame('hello', Worker::readFrame($reader));
+        fclose($reader);
+    }
 }
 
 /** A domain exception that cannot be built from a message alone. */

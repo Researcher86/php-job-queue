@@ -10,7 +10,7 @@ This repository answers one question by building the answer:
 
 It is not a replacement for RabbitMQ, Redis, Kafka, Symfony Messenger,
 Laravel Queue or Sidekiq. It is the mechanism those things contain, with
-nothing else in the way: 38 classes, no dependencies beyond a UUID library,
+nothing else in the way: 39 classes, no dependencies beyond a UUID library,
 and every reliability feature written out where you can put a breakpoint in
 it.
 
@@ -24,7 +24,8 @@ Read  →  Run  →  Experiment  →  Break something  →  Observe  →  Unders
 
 ## Status
 
-All 16 planned phases are complete: 236 tests, PHPStan level 8 clean.
+Every mechanism below is built and tested (`make test` runs the whole
+suite), and PHPStan level 8 is clean.
 
 `Job state machine` · `FIFO / delayed / priority queues` · `Producer` ·
 `Forked worker pool` · `Dispatcher` · `ACK / NACK` · `Delivery leases and
@@ -471,7 +472,10 @@ READY  →  worker takes the job  →  PROCESSING  →  worker dies 💀
 
 Without protection the job is simply gone: not queued, not completed, not
 failed. So a dispatched job gets a deadline, and if no ACK arrives before
-it, the job returns to READY and goes to someone else.
+it, the job returns to READY and goes to someone else — unless that
+delivery was its last allowed attempt, in which case it is FAILED and
+dead-lettered like any other exhausted job. A lease that expires on every
+delivery must not cycle forever.
 
 ```php
 new JobDispatcher($queue, $pool, visibilityTimeout: 30);
@@ -608,7 +612,8 @@ the runtime down and leaving the job marked PROCESSING with no worker behind
 it. [`WorkerPool::maintain()`](src/Worker/WorkerPool.php) closes that with a
 non-blocking `waitpid` per idle worker, and the race it cannot close (killed
 after the check, before the write) is reported as `WorkerDiedException`,
-which the dispatcher answers by putting the job straight back.
+which the dispatcher answers by putting the job straight back (or into the
+DLQ, if that was its last attempt — see below).
 
 ```text
 worker dies
@@ -619,6 +624,13 @@ mark DEAD  →  fork a replacement  →  capacity restored
      ↓
 the job it held goes back to READY  →  runs again
 ```
+
+The job goes back **only while it has attempts left**. A delivery is an
+attempt whether or not anyone answered it, so a job that kills every worker
+it touches — an OOM payload, a segfaulting extension — spends its budget like
+any other, and then goes to the DLQ as FAILED with a `DeliveryLostException`
+recorded as the cause. These paths used to requeue unconditionally, and such
+a job recycled workers forever.
 
 DRAINING and STOPPING workers are skipped by the reaper on purpose: those
 are leaving because we told them to, and counting a deliberate shutdown as a
@@ -646,7 +658,12 @@ all of it.
 `load()` therefore **tolerates a malformed final line** — that is a write
 torn by the crash we are recovering from, and refusing to start because the
 last record is half-written would make the log useless exactly when it is
-needed. A malformed line anywhere else is corruption, and throws.
+needed. It also **truncates** that line off the file, so the next append
+starts on a clean line instead of gluing itself to the torn one (which used
+to produce a corrupt middle line and a log that refused to load on the
+restart after next). A malformed line anywhere else is corruption, and
+throws. Appends and loads take an exclusive `flock`, so a load in one process
+never mistakes another process's in-progress append for a torn one.
 
 On restore:
 
@@ -654,6 +671,7 @@ On restore:
 |---|---|
 | READY, DELAYED | restored as it was |
 | PROCESSING | back to READY — nobody is left to ACK it, so it runs again, **with its attempt count intact** |
+| PROCESSING, attempts spent | FAILED, logged as such, and into the DLQ passed to `restoreFromStorage()` |
 | COMPLETED, FAILED | not restored; a finished job is not work |
 
 The PROCESSING row is the at-least-once bargain restated at the persistence
@@ -663,6 +681,14 @@ job goes **out**, not only when it comes back. That write is what makes
 the READY record from `push()`, so a crash hands the job its whole
 allowance again and a job that reliably kills its worker loops across
 restarts forever instead of reaching the DLQ.
+
+**What is not persisted.** Only `InMemoryQueue` takes a `JobStorage`.
+`PriorityQueue` has none, so its jobs live only in memory, and the
+`DeadLetterQueue` is in-memory too: a restart keeps the log's FAILED record
+of a dead-lettered job but not the DLQ entry, its exception, or the ability
+to `retry()` it. And the storage passed to `restoreFromStorage()` must hold
+jobs only — see [the idempotency guard](#at-least-once-and-what-it-costs-you)
+for why it needs one of its own.
 
 ### Who writes what, and what it costs
 
@@ -914,6 +940,17 @@ job id or the attempt number would deduplicate nothing. And
 a restart is exactly when a job that already ran comes back — PROCESSING
 jobs in the log return to READY, side effect and all.
 
+Two things about where its keys live. **Across workers:** every forked worker
+has its own copy of the guard, so `isProcessed()` re-reads the storage on a
+miss — a key recorded by one worker is then seen by another in the same run.
+That needs a storage the processes share, i.e. a `FileStorage`; an
+`InMemoryStorage` is copied by the fork and dedups within one worker only.
+And two workers holding duplicates *at the same moment* can both miss and
+both charge — nothing locks the key between the check and the record.
+**Its own storage:** do not hand the guard the queue's log. The queue replays
+every record as a job, and `restoreFromStorage()` refuses a log with guard
+records in it rather than guessing.
+
 ### And this is deduplication, not exactly-once
 
 Worth being precise about, because the gap is one line of code wide:
@@ -998,13 +1035,13 @@ whole runtime instead and see what the log alone can restore.
 | what breaks | detected by | job outcome |
 |---|---|---|
 | handler throws | NACK | retried, then DLQ |
-| worker killed while busy | EOF on its socket | back to READY at once, worker replaced |
+| worker killed while busy | EOF on its socket | back to READY at once, worker replaced; FAILED + DLQ once attempts are spent |
 | worker killed while idle | `maintain()` reaper | no job involved; capacity restored |
-| worker killed between check and write | `WorkerDiedException` | back to READY at once |
+| worker killed between check and write | `WorkerDiedException` | back to READY at once; FAILED + DLQ once attempts are spent |
 | handler slower than the visibility timeout | deadline expires | delivered again; the expired delivery's answer is fenced out as a stale ACK |
-| worker never answers | visibility timeout | back to READY when the deadline passes |
-| runtime killed with SIGTERM | signal handler | in-flight jobs finish within the grace period |
-| runtime killed with SIGKILL | nothing, until restart | PROCESSING jobs in the log return to READY |
+| worker never answers | visibility timeout | back to READY when the deadline passes; FAILED + DLQ once attempts are spent |
+| runtime sent SIGTERM, even mid-startup | signal handler (blocked, not lost, while the pool forks) | in-flight jobs finish within the grace period |
+| runtime killed with SIGKILL | nothing, until restart | PROCESSING jobs in the log return to READY, or FAILED + DLQ if attempts are spent |
 | queue process dies with no storage | nothing | jobs are lost — this is what storage is for |
 | job fails every attempt | attempts exhausted | FAILED, and a DLQ record |
 
@@ -1053,7 +1090,8 @@ php-job-queue/
 ├── examples/                       one mechanism each (make example EXAMPLE=…)
 ├── src/
 │   ├── Job/                        Job, JobId, JobState, JobPriority, JobResult
-│   ├── Delivery/                   Delivery — the lease an ACK answers for
+│   ├── Delivery/                   Delivery — the lease an ACK answers for,
+│   │                               DeliveryLostException
 │   ├── Producer/                   Producer, JobFactory
 │   ├── Queue/                      Queue, InMemoryQueue, PriorityQueue,
 │   │                               LaneSelector + StrictPriority/WeightedRoundRobin
@@ -1135,6 +1173,8 @@ missing, and deliberately:
 * no shared queue between machines, so no distributed locking or leader
   election;
 * no snapshots to bound the persistence replay;
+* no persistence for `PriorityQueue` or the dead letter queue — only
+  `InMemoryQueue` writes to a `JobStorage`;
 * no transactional handler boundary — a side effect and its idempotency
   record cannot commit together, so deduplication keeps a crash window;
 * no autoscaling — the pool size is fixed, because the interesting question

@@ -17,7 +17,7 @@ use PhpJobQueue\Worker\WorkerPool;
 require __DIR__ . '/bootstrap.php';
 
 /**
- * Throughput and latency under load - PLAN.md Phase 16's stress side.
+ * Throughput and latency under load - the harness behind docs/BENCHMARKS.md.
  *
  *   make bench                                1,000 jobs, 4 workers
  *   make bench ARGS="10000 8"                10,000 jobs, 8 workers

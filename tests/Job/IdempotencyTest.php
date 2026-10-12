@@ -10,6 +10,7 @@ use PhpJobQueue\Idempotency\IdempotencyGuard;
 use PhpJobQueue\Job\Job;
 use PhpJobQueue\Job\JobState;
 use PhpJobQueue\Persistence\FileStorage;
+use PhpJobQueue\Persistence\InMemoryStorage;
 use PhpJobQueue\Producer\JobFactory;
 use PhpJobQueue\Producer\Producer;
 use PhpJobQueue\Queue\InMemoryQueue;
@@ -94,6 +95,52 @@ final class IdempotencyTest extends TestCase
                 unlink($path);
             }
         }
+    }
+
+    /**
+     * After the fork every worker holds its own copy of the guard, built
+     * from whatever the log said at the time. Two guards on one log file is
+     * exactly that situation without the fork: a key one worker records has
+     * to be visible to the other one in the same run, not only after a
+     * restart - otherwise a duplicate delivery that lands on a different
+     * worker charges again.
+     */
+    public function testAKeyRecordedByOneWorkerIsSeenByAnotherInTheSameRun(): void
+    {
+        $path = sys_get_temp_dir() . '/php-job-queue-idempotency-' . uniqid('', true) . '.log';
+
+        try {
+            $workerA = new IdempotencyGuard(new FileStorage($path));
+            $workerB = new IdempotencyGuard(new FileStorage($path));
+
+            $workerA->markProcessed('payment:order-1');
+
+            $this->assertTrue($workerB->isProcessed('payment:order-1'));
+        } finally {
+            if (file_exists($path)) {
+                unlink($path);
+            }
+        }
+    }
+
+    /**
+     * The guard and the queue both write to a JobStorage, and handing them
+     * the SAME one looks harmless until the restart: the queue replays
+     * every record as a job, and a guard record is not one. That has to
+     * fail with an error that says what went wrong, not an undefined-index
+     * warning from deep inside Job::fromArray().
+     */
+    public function testSharingOneStorageBetweenGuardAndQueueIsRefusedClearlyOnRestore(): void
+    {
+        $storage = new InMemoryStorage();
+        $queue = new InMemoryQueue(new FakeClock(1000.0), $storage);
+        $queue->push(Job::create(type: 'charge_payment', idempotencyKey: 'payment:order-1'));
+        (new IdempotencyGuard($storage))->markProcessed('payment:order-1');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('IdempotencyGuard');
+
+        InMemoryQueue::restoreFromStorage($storage, new FakeClock(2000.0));
     }
 
     public function testChargesOnlyOncePerIdempotencyKey(): void

@@ -11,8 +11,8 @@ use PhpJobQueue\Support\SystemClock;
 use Throwable;
 
 /**
- * Where jobs go when retrying them has stopped being useful - PLAN.md
- * Phase 10.
+ * Where jobs go when retrying them has stopped being useful - README
+ * § Dead letter queue.
  *
  * Without it, a job that can never succeed has two possible endings, and
  * both are bad: retry forever, burning workers on work that will not

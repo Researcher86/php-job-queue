@@ -7,7 +7,7 @@ namespace PhpJobQueue\Retry;
 use PhpJobQueue\Job\Job;
 
 /**
- * Doubling delays: 1s, 2s, 4s, 8s - PLAN.md Phase 7.
+ * Doubling delays: 1s, 2s, 4s, 8s - README § Retries.
  *
  * The delay grows with the attempt count, so a job that keeps failing asks
  * less and less often. Which is the useful behaviour when the reason it

@@ -94,7 +94,8 @@ $worker->assign($job);         // 3. only now does it leave the process
 Registering with the monitor **before** the write is what closes the window.
 If step 3 throws — the worker died between the reaper's check and the write
 — the job is already tracked, and the catch puts it straight back on the
-queue rather than leaving it to a timeout.
+queue rather than leaving it to a timeout (or into the DLQ, if that was its
+last attempt).
 
 *Would break it:* writing to the socket first and marking PROCESSING after.
 A crash between the two would leave a job that a worker is running and the
@@ -177,13 +178,17 @@ The lease under that job's id belongs to the live delivery.
 ### 6. A failed attempt is not a failed job
 
 `attempts` counts **deliveries**. A NACK with attempts left returns the job
-to READY; only exhausting them reaches FAILED, which is the one state a DLQ
+to READY, and so does a delivery nobody answered (a dead worker, an expired
+lease, a crashed process); only exhausting them reaches FAILED, which is the one state a DLQ
 record is made from. Nothing else writes to the DLQ, and a job in the DLQ is
 FAILED — `DeadLetterQueue::retry()` refuses a record whose job is in any
 other state.
 
 *Held by:* `JobDispatcherTest::testFailedJobIsRetriedWhenAttemptsRemain`,
 `testFailedJobIsFailedAfterExhaustingAttempts`,
+`testAJobWhoseWorkerDiesEveryTimeIsDeadLetteredWhenItsAttemptsRunOut`,
+`testAJobWhoseLeaseKeepsExpiringIsDeadLetteredWhenItsAttemptsRunOut`,
+`testAJobThatKeepsKillingItsWorkerStillReachesTheDlq`,
 `DeadLetterQueueTest::testRetryRequeuesJobToReady`.
 
 ---
@@ -299,8 +304,9 @@ kill -9 <worker pid>
              │
              └─ applyResult()
                   ├─ result === null
-                  ├─ markRetry(now)          READY, available immediately
-                  ├─ Queue::push()
+                  ├─ redeliverOrDeadLetter()
+                  │    ├─ attempts left: markRetry(now) → READY, Queue::push()
+                  │    └─ attempts spent: markFailed() → FAILED, DLQ
                   └─ WorkerPool::replaceDeadWorkers()
                        ├─ fork a replacement in the same slot
                        └─ metrics: worker_crashes++
@@ -308,7 +314,9 @@ kill -9 <worker pid>
 
 The job does **not** wait for the visibility timeout here — the crash was
 detected directly, so it is requeued at once. The timeout is the fallback
-for deaths nothing observed.
+for deaths nothing observed. Nor does it get its attempt back: the delivery
+counted, so a job whose worker dies on every attempt reaches the DLQ like
+any other exhausted job.
 
 ### A worker is killed while idle
 
@@ -384,8 +392,10 @@ kill -9 <runtime pid>
         restart:
         └─ InMemoryQueue::restoreFromStorage()
              ├─ replay the log, last write per job id wins
-             ├─ tolerate a torn final line (that write was the crash)
+             ├─ tolerate a torn final line (that write was the crash),
+             │  and truncate it so the next append starts clean
              ├─ PROCESSING  →  markRetry(now)  →  READY, attempts intact
+             ├─ PROCESSING, attempts spent  →  FAILED, logged, into the DLQ
              ├─ READY / DELAYED  →  as they were
              └─ COMPLETED / FAILED  →  not restored
 ```

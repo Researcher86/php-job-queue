@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace PhpJobQueue\Metrics;
 
 /**
- * A gauge reading: what the system looks like at one instant - PLAN.md
- * Phase 14.
+ * A gauge reading: what the system looks like at one instant - README
+ * § Metrics.
  *
  * Separate from MetricsCollector because the two answer different
  * questions and age differently. A counter is cumulative and only ever

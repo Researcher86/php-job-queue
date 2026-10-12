@@ -57,7 +57,7 @@ measure startup.
 
 **Queue wait grows with depth and execution does not.** 1.9 seconds of
 average wait against 0.14 ms of average handler at 100,000 jobs. This is
-Phase 14's whole argument as a measurement: a job that took two seconds is
+The case for three latencies (docs/DECISIONS.md §10) as a measurement: a job that took two seconds is
 not evidence of a slow handler. It waited.
 
 ---

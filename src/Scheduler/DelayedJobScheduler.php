@@ -10,7 +10,7 @@ use RuntimeException;
 
 /**
  * Holds jobs that are not allowed to run yet, and hands them back the
- * moment they are - PLAN.md Phase 8.
+ * moment they are - README § Delayed jobs.
  *
  * Two different things end up here, and it matters that they are the same
  * mechanism:

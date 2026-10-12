@@ -7,7 +7,7 @@ namespace PhpJobQueue\Retry;
 use PhpJobQueue\Job\Job;
 
 /**
- * How long to wait before trying a failed job again - PLAN.md Phase 7.
+ * How long to wait before trying a failed job again - README § Retries.
  *
  * An interface with two implementations because the choice matters and has
  * no universally right answer: a fixed delay is predictable, and a
